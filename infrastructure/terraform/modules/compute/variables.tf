@@ -60,3 +60,30 @@ variable "target_group_arn" {
   description = "ARN of the ALB target group. The ASG registers its instances with this target group."
   type        = string
 }
+
+variable "db_host" {
+  description = "RDS database hostname."
+  type        = string
+}
+
+variable "db_port" {
+  description = "RDS database port."
+  type        = number
+  default     = 5432
+}
+
+variable "db_name" {
+  description = "RDS database name."
+  type        = string
+}
+
+variable "db_username" {
+  description = "RDS database username."
+  type        = string
+}
+
+variable "db_password" {
+  description = "RDS database password."
+  type        = string
+  sensitive   = true
+}

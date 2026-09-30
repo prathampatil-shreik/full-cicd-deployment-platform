@@ -98,6 +98,12 @@ module "compute" {
 
   target_group_arn = module.alb.target_group_arn
 
+  db_host     = module.rds.db_endpoint
+  db_port     = module.rds.db_port
+  db_name     = module.rds.db_name
+  db_username = var.db_username
+  db_password = var.db_password
+
   depends_on = [
     module.network,
     module.security,

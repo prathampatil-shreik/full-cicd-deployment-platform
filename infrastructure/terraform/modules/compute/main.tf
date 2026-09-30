@@ -89,6 +89,11 @@ resource "aws_launch_template" "app" {
       ecr_repository_url  = var.ecr_repository_url
       container_image_tag = var.container_image_tag
       app_port            = var.app_port
+      db_host             = var.db_host
+      db_port             = var.db_port
+      db_name             = var.db_name
+      db_username         = var.db_username
+      db_password         = var.db_password
     })
   )
 
@@ -126,6 +131,14 @@ resource "aws_autoscaling_group" "app" {
   launch_template {
     id      = aws_launch_template.app.id
     version = "$Latest"
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 50
+      instance_warmup        = 300
+    }
   }
 
   tag {

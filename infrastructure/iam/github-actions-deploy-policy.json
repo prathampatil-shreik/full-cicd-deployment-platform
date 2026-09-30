@@ -1,0 +1,93 @@
+{
+  "_note": "Attach this policy to the manually created IAM user (not an OIDC role). The IAM user's Access Key ID and Secret Access Key are stored as GitHub Actions secrets: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECRAuth",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRPush",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeImages",
+        "ecr:DescribeRepositories",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:InitiateLayerUpload",
+        "ecr:ListImages",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:925213028316:repository/full-cicd-deployment-platform-dev-app"
+    },
+    {
+      "Sid": "ASGDeploy",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeInstanceRefreshes",
+        "autoscaling:StartInstanceRefresh",
+        "autoscaling:CancelInstanceRefresh"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LaunchTemplate",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateLaunchTemplateVersion",
+        "ec2:DescribeLaunchTemplateVersions",
+        "ec2:DescribeLaunchTemplates",
+        "ec2:ModifyLaunchTemplate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ALBVerify",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetHealth"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TerraformState",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": [
+        "arn:aws:s3:::YOUR-TERRAFORM-STATE-BUCKET",
+        "arn:aws:s3:::YOUR-TERRAFORM-STATE-BUCKET/*",
+        "arn:aws:dynamodb:us-east-1:925213028316:table/YOUR-TERRAFORM-LOCK-TABLE"
+      ]
+    },
+    {
+      "Sid": "TerraformReadInfra",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "elasticloadbalancing:Describe*",
+        "autoscaling:Describe*",
+        "rds:Describe*",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:GetInstanceProfile",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
