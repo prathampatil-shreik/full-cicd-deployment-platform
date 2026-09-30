@@ -58,11 +58,13 @@ jobs:
 
       - name: Terraform plan (no apply)
         working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform plan \
-            -var="db_password=${{ secrets.DB_PASSWORD }}" \
-            -input=false \
-            -out=tfplan
+        env:
+          TF_VAR_vpc_cidr: "10.0.0.0/16"
+          TF_VAR_availability_zones: '["us-east-1a","us-east-1b"]'
+          TF_VAR_public_subnet_cidrs: '["10.0.1.0/24","10.0.2.0/24"]'
+          TF_VAR_private_subnet_cidrs: '["10.0.11.0/24","10.0.12.0/24"]'
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+        run: terraform plan -input=false -out=tfplan
 
   # ─────────────────────────────────────────────────────────────
   # JOB 2 – build & push (only on push to main/master)
