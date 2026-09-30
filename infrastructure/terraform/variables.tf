@@ -122,3 +122,15 @@ variable "asg_max_size" {
   type        = number
   default     = 4
 }
+
+variable "cpu_scale_target" {
+  description = "CPU utilisation percentage target for ASG target-tracking scaling policy."
+  type        = number
+  default     = 60
+}
+
+variable "ecr_repository_url_override" {
+  description = "Override the ECR repository URL. Used by PROD to reuse the DEV ECR repo instead of creating a separate one."
+  type        = string
+  default     = ""
+}

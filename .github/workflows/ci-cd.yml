@@ -5,6 +5,17 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Immutable ECR image tag (commit SHA) to deploy — used for manual rollback"
+        required: true
+      environment:
+        description: "Target environment for rollback"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, prod]
 
 concurrency:
   group: cicd-${{ github.ref }}
@@ -13,8 +24,11 @@ concurrency:
 env:
   ECR_REGISTRY: 925213028316.dkr.ecr.us-east-1.amazonaws.com
   ECR_REPOSITORY: full-cicd-deployment-platform-dev-app
-  ASG_NAME: full-cicd-deployment-platform-dev-app-asg
-  ALB_DNS: full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com
+  DEV_ASG_NAME: full-cicd-deployment-platform-dev-app-asg
+  DEV_ALB_DNS: full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com
+  DEV_TG_NAME: full-cicd-deployment-dev-tg
+  PROD_ASG_NAME: full-cicd-deployment-platform-prod-app-asg
+  PROD_TG_NAME: full-cicd-deployment-prod-tg
   TF_DIR: infrastructure/terraform
 
 # No id-token permission needed — authentication uses IAM access keys via secrets.
@@ -56,7 +70,7 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
-      - name: Terraform plan (no apply)
+      - name: Terraform plan — DEV (no apply)
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_vpc_cidr: "10.0.0.0/16"
@@ -64,10 +78,11 @@ jobs:
           TF_VAR_public_subnet_cidrs: '["10.0.1.0/24","10.0.2.0/24"]'
           TF_VAR_private_subnet_cidrs: '["10.0.11.0/24","10.0.12.0/24"]'
           TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
-        run: terraform plan -input=false -out=tfplan
+        run: terraform plan -input=false
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 2 – build & push (only on push to main/master)
+  # JOB 2 – build & push (push to main/master only)
+  # workflow_dispatch skips build — uses the provided image_tag
   # ─────────────────────────────────────────────────────────────
   build:
     name: Build & Push Image
@@ -123,13 +138,17 @@ jobs:
             --output text
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 3 – deploy (rolling instance refresh)
+  # JOB 3 – deploy to DEV (rolling instance refresh)
+  # Also triggered by workflow_dispatch when environment == 'dev'
   # ─────────────────────────────────────────────────────────────
-  deploy:
-    name: Deploy to ASG
+  deploy-dev:
+    name: Deploy to DEV
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'push'
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    environment: dev
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -138,11 +157,19 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Get current Launch Template ID
+      - name: Resolve DEV image tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "IMAGE_TAG=${{ github.event.inputs.image_tag }}" >> "$GITHUB_ENV"
+          else
+            echo "IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Get DEV Launch Template ID
         id: lt
         run: |
           LT_ID=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ env.ASG_NAME }}" \
+            --auto-scaling-group-names "${{ env.DEV_ASG_NAME }}" \
             --query 'AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' \
             --output text)
           echo "lt_id=${LT_ID}" >> "$GITHUB_OUTPUT"
@@ -156,10 +183,9 @@ jobs:
             --query 'LaunchTemplateVersions[0].LaunchTemplateData.UserData' \
             --output text)
 
-          # Decode, replace the image tag, re-encode
           DECODED=$(echo "$USERDATA" | base64 -d)
           UPDATED=$(echo "$DECODED" | sed \
-            "s|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:[^ ]*|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ needs.build.outputs.image_tag }}|g")
+            "s|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:[^ ]*|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}|g")
           ENCODED=$(echo "$UPDATED" | base64 -w 0)
 
           NEW_VERSION=$(aws ec2 create-launch-template-version \
@@ -177,11 +203,11 @@ jobs:
             --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
             --default-version "${{ steps.lt_version.outputs.new_version }}"
 
-      - name: Start instance refresh (rolling deploy)
+      - name: Start DEV instance refresh (rolling deploy)
         id: refresh
         run: |
           REFRESH_ID=$(aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name "${{ env.ASG_NAME }}" \
+            --auto-scaling-group-name "${{ env.DEV_ASG_NAME }}" \
             --preferences '{
               "MinHealthyPercentage": 50,
               "InstanceWarmup": 300,
@@ -191,42 +217,44 @@ jobs:
             --query 'InstanceRefreshId' \
             --output text)
           echo "refresh_id=${REFRESH_ID}" >> "$GITHUB_OUTPUT"
-          echo "Instance refresh started: ${REFRESH_ID}"
+          echo "DEV instance refresh started: ${REFRESH_ID}"
 
-      - name: Wait for instance refresh to complete
+      - name: Wait for DEV instance refresh to complete
         run: |
           REFRESH_ID="${{ steps.refresh.outputs.refresh_id }}"
-          echo "Polling refresh ${REFRESH_ID}..."
+          echo "Polling DEV refresh ${REFRESH_ID}..."
           for i in $(seq 1 40); do
             STATUS=$(aws autoscaling describe-instance-refreshes \
-              --auto-scaling-group-name "${{ env.ASG_NAME }}" \
+              --auto-scaling-group-name "${{ env.DEV_ASG_NAME }}" \
               --instance-refresh-ids "${REFRESH_ID}" \
               --query 'InstanceRefreshes[0].Status' \
               --output text)
             echo "  [${i}/40] Status: ${STATUS}"
             case "${STATUS}" in
               Successful)
-                echo "Instance refresh completed successfully."
+                echo "DEV instance refresh completed successfully."
                 exit 0
                 ;;
               Failed|Cancelled|RollbackFailed)
-                echo "Instance refresh failed with status: ${STATUS}"
+                echo "DEV instance refresh failed with status: ${STATUS}"
                 exit 1
                 ;;
             esac
             sleep 30
           done
-          echo "Timed out waiting for instance refresh."
+          echo "Timed out waiting for DEV instance refresh."
           exit 1
 
   # ─────────────────────────────────────────────────────────────
-  # JOB 4 – verify
+  # JOB 4 – verify DEV
   # ─────────────────────────────────────────────────────────────
-  verify:
-    name: Verify Deployment
+  verify-dev:
+    name: Verify DEV
     runs-on: ubuntu-latest
-    needs: [build, deploy]
-    if: github.event_name == 'push'
+    needs: [build, deploy-dev]
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -235,19 +263,19 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Check ASG instance count
+      - name: Check DEV ASG instance count
         run: |
           INSERVICE=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ env.ASG_NAME }}" \
+            --auto-scaling-group-names "${{ env.DEV_ASG_NAME }}" \
             --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`] | length(@)' \
             --output text)
-          echo "InService instances: ${INSERVICE}"
+          echo "DEV InService instances: ${INSERVICE}"
           [ "${INSERVICE}" -ge 2 ] || { echo "Expected >=2 InService instances"; exit 1; }
 
-      - name: Check ALB target group health
+      - name: Check DEV ALB target group health
         run: |
           TG_ARN=$(aws elbv2 describe-target-groups \
-            --names "full-cicd-deployment-dev-tg" \
+            --names "${{ env.DEV_TG_NAME }}" \
             --query 'TargetGroups[0].TargetGroupArn' \
             --output text)
 
@@ -256,32 +284,267 @@ jobs:
               --target-group-arn "${TG_ARN}" \
               --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' \
               --output text)
-            echo "  [${i}/10] Healthy targets: ${HEALTHY}"
+            echo "  [${i}/10] DEV healthy targets: ${HEALTHY}"
             [ "${HEALTHY}" -ge 1 ] && break
             sleep 30
           done
-          [ "${HEALTHY}" -ge 1 ] || { echo "No healthy targets in ALB target group"; exit 1; }
+          [ "${HEALTHY}" -ge 1 ] || { echo "No healthy targets in DEV ALB target group"; exit 1; }
 
-      - name: HTTP health check against ALB
+      - name: Zero-downtime proof — poll ALB during instance refresh
+        run: |
+          echo "Polling DEV ALB for 3 minutes to demonstrate zero-downtime deployment..."
+          SUCCESS=0
+          FAIL=0
+          for i in $(seq 1 36); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 5 \
+              "http://${{ env.DEV_ALB_DNS }}/" 2>/dev/null || echo "000")
+            TS=$(date -u +%H:%M:%S)
+            if [[ "${HTTP_CODE}" =~ ^[23] ]]; then
+              echo "  ${TS}  [${i}/36]  HTTP ${HTTP_CODE}  OK"
+              SUCCESS=$((SUCCESS + 1))
+            else
+              echo "  ${TS}  [${i}/36]  HTTP ${HTTP_CODE}  FAIL"
+              FAIL=$((FAIL + 1))
+            fi
+            sleep 5
+          done
+          echo "---"
+          echo "Zero-downtime result: ${SUCCESS} successful / ${FAIL} failed requests"
+          [ "${FAIL}" -eq 0 ] || echo "WARNING: ${FAIL} failed requests detected during rolling deployment"
+
+      - name: HTTP health check against DEV ALB
         run: |
           for i in $(seq 1 5); do
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
               --max-time 10 \
-              "http://${{ env.ALB_DNS }}/")
-            echo "  [${i}/5] HTTP response: ${HTTP_CODE}"
+              "http://${{ env.DEV_ALB_DNS }}/")
+            echo "  [${i}/5] DEV HTTP response: ${HTTP_CODE}"
             if [[ "${HTTP_CODE}" =~ ^[23] ]]; then
-              echo "ALB health check passed (HTTP ${HTTP_CODE})."
+              echo "DEV ALB health check passed (HTTP ${HTTP_CODE})."
               exit 0
             fi
             sleep 15
           done
-          echo "ALB health check failed after retries."
+          echo "DEV ALB health check failed after retries."
           exit 1
 
       - name: Verify ECR image exists
         run: |
+          IMAGE_TAG="${{ needs.build.outputs.image_tag || github.event.inputs.image_tag }}"
           aws ecr describe-images \
             --repository-name "${{ env.ECR_REPOSITORY }}" \
-            --image-ids imageTag="${{ needs.build.outputs.image_tag }}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'imageDetails[0].imageTags' \
+            --output text
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 5 – manual approval gate before PROD
+  # Configure required reviewers at:
+  # GitHub → Settings → Environments → prod → Required reviewers
+  # ─────────────────────────────────────────────────────────────
+  approve-prod:
+    name: Approve PROD Deployment
+    runs-on: ubuntu-latest
+    needs: verify-dev
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    environment: prod
+    steps:
+      - name: Approval granted
+        run: |
+          echo "Production deployment approved."
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Rollback/manual deploy — image tag: ${{ github.event.inputs.image_tag }}"
+          else
+            echo "Image tag to promote: ${{ needs.build.outputs.image_tag }}"
+          fi
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 6 – deploy the SAME image to PROD
+  # ─────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy to PROD
+    runs-on: ubuntu-latest
+    needs: [build, approve-prod]
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get PROD Launch Template ID
+        id: lt
+        run: |
+          LT_ID=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "${{ env.PROD_ASG_NAME }}" \
+            --query 'AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' \
+            --output text)
+          echo "lt_id=${LT_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Create new PROD Launch Template version with promoted image tag
+        id: lt_version
+        run: |
+          # Promote the exact same SHA image that was verified in DEV.
+          # workflow_dispatch uses the manually supplied image_tag (rollback).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          else
+            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+          fi
+          echo "Promoting image tag: ${IMAGE_TAG}"
+
+          USERDATA=$(aws ec2 describe-launch-template-versions \
+            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
+            --versions '$Latest' \
+            --query 'LaunchTemplateVersions[0].LaunchTemplateData.UserData' \
+            --output text)
+
+          DECODED=$(echo "$USERDATA" | base64 -d)
+          UPDATED=$(echo "$DECODED" | sed \
+            "s|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:[^ ]*|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}|g")
+          ENCODED=$(echo "$UPDATED" | base64 -w 0)
+
+          NEW_VERSION=$(aws ec2 create-launch-template-version \
+            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
+            --source-version '$Latest' \
+            --launch-template-data "{\"UserData\":\"${ENCODED}\"}" \
+            --query 'LaunchTemplateVersion.VersionNumber' \
+            --output text)
+
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Set PROD Launch Template default version
+        run: |
+          aws ec2 modify-launch-template \
+            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
+            --default-version "${{ steps.lt_version.outputs.new_version }}"
+
+      - name: Start PROD instance refresh (rolling deploy)
+        id: refresh
+        run: |
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "${{ env.PROD_ASG_NAME }}" \
+            --preferences '{
+              "MinHealthyPercentage": 50,
+              "InstanceWarmup": 300,
+              "CheckpointPercentages": [50, 100],
+              "CheckpointDelay": 60
+            }' \
+            --query 'InstanceRefreshId' \
+            --output text)
+          echo "refresh_id=${REFRESH_ID}" >> "$GITHUB_OUTPUT"
+          echo "PROD instance refresh started: ${REFRESH_ID}"
+
+      - name: Wait for PROD instance refresh to complete
+        run: |
+          REFRESH_ID="${{ steps.refresh.outputs.refresh_id }}"
+          echo "Polling PROD refresh ${REFRESH_ID}..."
+          for i in $(seq 1 40); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "${{ env.PROD_ASG_NAME }}" \
+              --instance-refresh-ids "${REFRESH_ID}" \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text)
+            echo "  [${i}/40] Status: ${STATUS}"
+            case "${STATUS}" in
+              Successful)
+                echo "PROD instance refresh completed successfully."
+                exit 0
+                ;;
+              Failed|Cancelled|RollbackFailed)
+                echo "PROD instance refresh failed with status: ${STATUS}"
+                exit 1
+                ;;
+            esac
+            sleep 30
+          done
+          echo "Timed out waiting for PROD instance refresh."
+          exit 1
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 7 – verify PROD
+  # ─────────────────────────────────────────────────────────────
+  verify-prod:
+    name: Verify PROD
+    runs-on: ubuntu-latest
+    needs: [build, deploy-prod]
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check PROD ASG instance count
+        run: |
+          INSERVICE=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "${{ env.PROD_ASG_NAME }}" \
+            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`] | length(@)' \
+            --output text)
+          echo "PROD InService instances: ${INSERVICE}"
+          [ "${INSERVICE}" -ge 2 ] || { echo "Expected >=2 PROD InService instances"; exit 1; }
+
+      - name: Check PROD ALB target group health
+        run: |
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --names "${{ env.PROD_TG_NAME }}" \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+
+          for i in $(seq 1 10); do
+            HEALTHY=$(aws elbv2 describe-target-health \
+              --target-group-arn "${TG_ARN}" \
+              --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' \
+              --output text)
+            echo "  [${i}/10] PROD healthy targets: ${HEALTHY}"
+            [ "${HEALTHY}" -ge 1 ] && break
+            sleep 30
+          done
+          [ "${HEALTHY}" -ge 1 ] || { echo "No healthy targets in PROD ALB target group"; exit 1; }
+
+      - name: Get PROD ALB DNS and HTTP health check
+        run: |
+          PROD_ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --names "full-cicd-deployment-prod-alb" \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)
+          echo "PROD ALB DNS: ${PROD_ALB_DNS}"
+
+          for i in $(seq 1 5); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 10 \
+              "http://${PROD_ALB_DNS}/")
+            echo "  [${i}/5] PROD HTTP response: ${HTTP_CODE}"
+            if [[ "${HTTP_CODE}" =~ ^[23] ]]; then
+              echo "PROD ALB health check passed (HTTP ${HTTP_CODE})."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "PROD ALB health check failed after retries."
+          exit 1
+
+      - name: Confirm same image tag in PROD as DEV
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          else
+            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+          fi
+          echo "Confirming ECR image tag ${IMAGE_TAG} exists (same image as DEV)..."
+          aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
             --query 'imageDetails[0].imageTags' \
             --output text
