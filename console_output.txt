@@ -1,0 +1,5 @@
+{
+    "InstanceId": "i-05cdf131564a9dc20",
+    "Timestamp": "2026-09-30T08:05:52+00:00",
+    "Output": 
+aws: [ERROR]: 'charmap' codec can't encode character '\u2192' in position 18241: character maps to <undefined>
