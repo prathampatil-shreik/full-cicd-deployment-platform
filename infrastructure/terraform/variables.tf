@@ -104,3 +104,21 @@ variable "rds_backup_retention_period" {
   type        = number
   default     = 7
 }
+
+variable "asg_min_size" {
+  description = "Minimum application instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_desired_capacity" {
+  description = "Desired application instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_max_size" {
+  description = "Maximum application instances."
+  type        = number
+  default     = 4
+}

@@ -104,10 +104,28 @@ module "compute" {
   db_username = var.db_username
   db_password = var.db_password
 
+  asg_min_size         = var.asg_min_size
+  asg_desired_capacity = var.asg_desired_capacity
+  asg_max_size         = var.asg_max_size
+
   depends_on = [
     module.network,
     module.security,
     module.ecr,
     module.alb,
   ]
+}
+
+resource "aws_autoscaling_policy" "cpu_target_tracking" {
+  name                   = "${var.project_name}-${var.environment}-cpu-target"
+  autoscaling_group_name = module.compute.autoscaling_group_name
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ASGAverageCPUUtilization"
+    }
+
+    target_value = 60
+  }
 }

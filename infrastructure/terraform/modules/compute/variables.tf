@@ -87,3 +87,21 @@ variable "db_password" {
   type        = string
   sensitive   = true
 }
+
+variable "asg_min_size" {
+  description = "Minimum number of application instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_desired_capacity" {
+  description = "Desired number of application instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_max_size" {
+  description = "Maximum number of application instances."
+  type        = number
+  default     = 4
+}
