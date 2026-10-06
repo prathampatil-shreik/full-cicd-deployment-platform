@@ -180,4 +180,5 @@ variable "container_image_tag" {
 variable "db_secret_arn" {
   description = "ARN of the Secrets Manager secret containing DB credentials (username, password, dbname)."
   type        = string
+  default     = "arn:aws:secretsmanager:us-east-1:925213028316:secret:full-cicd-deployment-platform/dev/database-nyXMta"
 }
