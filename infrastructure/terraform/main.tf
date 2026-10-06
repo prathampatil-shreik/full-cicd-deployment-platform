@@ -32,6 +32,10 @@ module "ecr" {
   environment  = var.environment
 }
 
+locals {
+  ecr_repository_url = var.ecr_repository_url_override != "" ? var.ecr_repository_url_override : module.ecr.repository_url
+}
+
 module "rds" {
   source = "./modules/rds"
 
@@ -84,7 +88,7 @@ module "compute" {
 
   app_security_group_id = module.security.app_security_group_id
 
-  ecr_repository_url = module.ecr.repository_url
+  ecr_repository_url = local.ecr_repository_url
 
   nat_gateway_id = module.network.nat_gateway_id
 
@@ -104,10 +108,28 @@ module "compute" {
   db_username = var.db_username
   db_password = var.db_password
 
+  asg_min_size         = var.asg_min_size
+  asg_desired_capacity = var.asg_desired_capacity
+  asg_max_size         = var.asg_max_size
+
   depends_on = [
     module.network,
     module.security,
     module.ecr,
     module.alb,
   ]
+}
+
+resource "aws_autoscaling_policy" "cpu_target_tracking" {
+  name                   = "${var.project_name}-${var.environment}-cpu-target"
+  autoscaling_group_name = module.compute.autoscaling_group_name
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ASGAverageCPUUtilization"
+    }
+
+    target_value = var.cpu_scale_target
+  }
 }

@@ -104,3 +104,33 @@ variable "rds_backup_retention_period" {
   type        = number
   default     = 7
 }
+
+variable "asg_min_size" {
+  description = "Minimum application instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_desired_capacity" {
+  description = "Desired application instances."
+  type        = number
+  default     = 2
+}
+
+variable "asg_max_size" {
+  description = "Maximum application instances."
+  type        = number
+  default     = 4
+}
+
+variable "cpu_scale_target" {
+  description = "CPU utilisation percentage target for ASG target-tracking scaling policy."
+  type        = number
+  default     = 60
+}
+
+variable "ecr_repository_url_override" {
+  description = "Override the ECR repository URL. Used by PROD to reuse the DEV ECR repo instead of creating a separate one."
+  type        = string
+  default     = ""
+}
