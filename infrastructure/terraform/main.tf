@@ -68,7 +68,9 @@ module "alb" {
 
   alb_security_group_id = module.security.alb_security_group_id
 
-  target_port = 8080
+  target_port          = 8080
+  health_check_path    = var.health_check_path
+  deregistration_delay = var.deregistration_delay
 
   depends_on = [
     module.network,

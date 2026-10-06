@@ -129,8 +129,26 @@ variable "cpu_scale_target" {
   default     = 60
 }
 
+variable "instance_type" {
+  description = "EC2 instance type for application servers."
+  type        = string
+  default     = "t3.micro"
+}
+
 variable "ecr_repository_url_override" {
   description = "Override the ECR repository URL. Used by PROD to reuse the DEV ECR repo instead of creating a separate one."
   type        = string
   default     = ""
+}
+
+variable "health_check_path" {
+  description = "ALB health check path for the ECS target group."
+  type        = string
+  default     = "/health"
+}
+
+variable "deregistration_delay" {
+  description = "Seconds ALB waits before deregistering a draining target. Reduced from the AWS default of 300 to shorten rolling deployment time."
+  type        = number
+  default     = 60
 }

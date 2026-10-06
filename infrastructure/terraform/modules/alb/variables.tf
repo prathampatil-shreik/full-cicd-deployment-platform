@@ -28,3 +28,15 @@ variable "target_port" {
   type        = number
   default     = 8080
 }
+
+variable "health_check_path" {
+  description = "Health check path for the ECS target group."
+  type        = string
+  default     = "/health"
+}
+
+variable "deregistration_delay" {
+  description = "Seconds ALB waits before deregistering a draining target. Reduce from the AWS default of 300 to shorten rolling deployment time."
+  type        = number
+  default     = 60
+}

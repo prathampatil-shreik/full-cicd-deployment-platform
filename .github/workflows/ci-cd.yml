@@ -205,8 +205,7 @@ jobs:
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
           echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
 
-          echo "Deploying image:"
-          echo "${IMAGE_URI}"
+          echo "Deploying image: ${IMAGE_URI}"
 
       # ----------------------------------------------------------
       # Verify requested image exists
@@ -272,11 +271,10 @@ jobs:
 
           echo "TASK_DEFINITION_ARN=${TASK_DEFINITION_ARN}" >> "$GITHUB_ENV"
 
-          echo "Registered:"
-          echo "${TASK_DEFINITION_ARN}"
+          echo "Registered: ${TASK_DEFINITION_ARN}"
 
       # ----------------------------------------------------------
-      # Update ECS service
+      # Update ECS service with new task definition
       # ----------------------------------------------------------
       - name: Update ECS service
         run: |
@@ -284,24 +282,127 @@ jobs:
             --cluster "${ECS_CLUSTER}" \
             --service "${ECS_SERVICE}" \
             --task-definition "${TASK_DEFINITION_ARN}" \
-            --region "${AWS_REGION}"
+            --region "${AWS_REGION}" \
+            --output json | jq '{
+              service:   .service.serviceName,
+              taskDef:   .service.taskDefinition,
+              desired:   .service.desiredCount,
+              running:   .service.runningCount,
+              pending:   .service.pendingCount
+            }'
 
       # ----------------------------------------------------------
-      # Wait for ECS rolling deployment
+      # Wait for ECS rolling deployment to complete.
+      #
+      # WHY a custom loop instead of `aws ecs wait services-stable`:
+      #   The AWS CLI waiter has a hard limit of 40 retries × 15 s = 600 s.
+      #   A zero-downtime rolling deploy with desired_count=2,
+      #   minimumHealthyPercent=100, and ALB health checks (interval=30s,
+      #   healthy_threshold=2) takes up to ~8 minutes after the
+      #   deregistration_delay is reduced to 60 s.
+      #   The CLI waiter expires before ECS finishes — not because ECS
+      #   failed, but because the waiter ceiling is too low.
+      #
+      # This loop:
+      #   - Polls every 15 seconds for up to 20 minutes (80 iterations)
+      #   - Prints live deployment status and recent service events
+      #   - Succeeds when: runningCount==desiredCount AND pendingCount==0
+      #     AND the PRIMARY deployment rolloutState==COMPLETED
+      #   - Fails immediately if rolloutState==FAILED
+      #   - Fails with a diagnostic dump if the timeout is reached
       # ----------------------------------------------------------
-      - name: Wait for ECS service stability
+      - name: Wait for ECS deployment to complete
         run: |
-          echo "Waiting for ECS service to become stable..."
+          echo "========================================"
+          echo "Waiting for ECS deployment to complete"
+          echo "Cluster : ${ECS_CLUSTER}"
+          echo "Service : ${ECS_SERVICE}"
+          echo "Task def: ${TASK_DEFINITION_ARN}"
+          echo "Timeout : 20 minutes"
+          echo "========================================"
 
-          aws ecs wait services-stable \
+          MAX_ITERATIONS=80   # 80 × 15 s = 1200 s = 20 minutes
+          SLEEP_SECONDS=15
+          LAST_EVENT_TIME=""
+
+          for i in $(seq 1 ${MAX_ITERATIONS}); do
+
+            # ── Fetch service state ──────────────────────────────
+            SERVICE_JSON=$(aws ecs describe-services \
+              --cluster "${ECS_CLUSTER}" \
+              --services "${ECS_SERVICE}" \
+              --region "${AWS_REGION}" \
+              --output json)
+
+            DESIRED=$(echo "${SERVICE_JSON}" | jq -r '.services[0].desiredCount')
+            RUNNING=$(echo "${SERVICE_JSON}" | jq -r '.services[0].runningCount')
+            PENDING=$(echo "${SERVICE_JSON}" | jq -r '.services[0].pendingCount')
+
+            # Primary deployment (the one we just triggered)
+            PRIMARY_JSON=$(echo "${SERVICE_JSON}" | \
+              jq -r '.services[0].deployments[] | select(.status=="PRIMARY")')
+
+            ROLLOUT_STATE=$(echo "${PRIMARY_JSON}" | jq -r '.rolloutState')
+            PRIMARY_RUNNING=$(echo "${PRIMARY_JSON}" | jq -r '.runningCount')
+            PRIMARY_DESIRED=$(echo "${PRIMARY_JSON}" | jq -r '.desiredCount')
+
+            TS=$(date -u +"%H:%M:%S")
+            echo "[${i}/${MAX_ITERATIONS}] ${TS} | desired=${DESIRED} running=${RUNNING} pending=${PENDING} | primary: running=${PRIMARY_RUNNING}/${PRIMARY_DESIRED} rollout=${ROLLOUT_STATE}"
+
+            # ── Print any new service events ─────────────────────
+            NEW_EVENTS=$(echo "${SERVICE_JSON}" | \
+              jq -r --arg LAST "${LAST_EVENT_TIME}" \
+              '.services[0].events[]
+               | select(.createdAt > $LAST)
+               | "  EVENT: " + .message' 2>/dev/null | tail -5)
+
+            if [ -n "${NEW_EVENTS}" ]; then
+              echo "${NEW_EVENTS}"
+              LAST_EVENT_TIME=$(echo "${SERVICE_JSON}" | \
+                jq -r '.services[0].events[0].createdAt // ""')
+            fi
+
+            # ── Check for hard failure ───────────────────────────
+            if [ "${ROLLOUT_STATE}" = "FAILED" ]; then
+              echo ""
+              echo "ERROR: ECS deployment FAILED (rolloutState=FAILED)."
+              echo "Recent service events:"
+              echo "${SERVICE_JSON}" | \
+                jq -r '.services[0].events[:10][] | "  " + .message'
+              exit 1
+            fi
+
+            # ── Check for success ────────────────────────────────
+            if [ "${ROLLOUT_STATE}" = "COMPLETED" ] \
+              && [ "${RUNNING}" = "${DESIRED}" ] \
+              && [ "${PENDING}" = "0" ]; then
+              echo ""
+              echo "========================================"
+              echo "ECS deployment completed successfully."
+              echo "desired=${DESIRED} running=${RUNNING} pending=${PENDING}"
+              echo "========================================"
+              exit 0
+            fi
+
+            sleep ${SLEEP_SECONDS}
+
+          done
+
+          # ── Timeout reached ──────────────────────────────────────
+          echo ""
+          echo "ERROR: Timed out after $((MAX_ITERATIONS * SLEEP_SECONDS)) seconds waiting for ECS stability."
+          echo ""
+          echo "Final service state:"
+          aws ecs describe-services \
             --cluster "${ECS_CLUSTER}" \
             --services "${ECS_SERVICE}" \
-            --region "${AWS_REGION}"
-
-          echo "ECS deployment completed successfully."
+            --region "${AWS_REGION}" \
+            --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount,deployments:deployments}' \
+            --output json
+          exit 1
 
       # ----------------------------------------------------------
-      # Show ECS service status
+      # Show final ECS service status
       # ----------------------------------------------------------
       - name: Show ECS deployment status
         run: |
@@ -390,8 +491,7 @@ jobs:
 
           echo "TG_ARN=${TG_ARN}" >> "$GITHUB_ENV"
 
-          echo "Target group:"
-          echo "${TG_ARN}"
+          echo "Target group: ${TG_ARN}"
 
       # ----------------------------------------------------------
       # Verify healthy Fargate targets
@@ -431,8 +531,7 @@ jobs:
         run: |
           URL="http://${DEV_ALB_DNS}/health"
 
-          echo "Testing:"
-          echo "${URL}"
+          echo "Testing: ${URL}"
 
           for i in $(seq 1 10); do
 
@@ -461,4 +560,3 @@ jobs:
 
           echo "ERROR: Application health check failed."
           exit 1
-

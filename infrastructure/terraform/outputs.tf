@@ -34,6 +34,11 @@ output "alb_arn" {
 }
 
 output "target_group_arn" {
-  description = "ARN of the ALB target group."
+  description = "ARN of the legacy EC2 instance ALB target group."
   value       = module.alb.target_group_arn
+}
+
+output "ecs_target_group_arn" {
+  description = "ARN of the ECS ip-type ALB target group."
+  value       = module.alb.ecs_target_group_arn
 }
