@@ -3,45 +3,59 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main, master]
+
   pull_request:
     branches: [main, master]
+
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Immutable ECR image tag (commit SHA) to deploy — used for manual rollback"
+        description: "Existing ECR image tag to deploy or rollback"
         required: true
+        type: string
       environment:
-        description: "Target environment for rollback"
+        description: "Target environment"
         required: true
         default: "dev"
         type: choice
-        options: [dev, prod]
+        options:
+          - dev
 
 concurrency:
   group: cicd-${{ github.ref }}
   cancel-in-progress: false
 
 env:
+  AWS_REGION: us-east-1
+
   ECR_REGISTRY: 925213028316.dkr.ecr.us-east-1.amazonaws.com
   ECR_REPOSITORY: full-cicd-deployment-platform-dev-app
-  DEV_ASG_NAME: full-cicd-deployment-platform-dev-app-asg
-  DEV_ALB_DNS: full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com
-  DEV_TG_NAME: full-cicd-deployment-dev-tg
-  PROD_ASG_NAME: full-cicd-deployment-platform-prod-app-asg
-  PROD_TG_NAME: full-cicd-deployment-prod-tg
+
+  ECS_CLUSTER: full-cicd-deployment-platform-dev
+  ECS_SERVICE: full-cicd-deployment-platform-dev-app
+  ECS_TASK_DEFINITION: full-cicd-deployment-platform-dev-app
+
+  ECS_CONTAINER_NAME: app
+  ECS_CONTAINER_PORT: 8080
+
+  ECS_TARGET_GROUP_NAME: full-cicd-deployment-dev-ecs-tg
+
+  DEV_ALB_DNS: full-cicd-deployment-dev-alb-1959686012.us-east-1.elb.amazonaws.com
+
   TF_DIR: infrastructure/terraform
 
-# No id-token permission needed — authentication uses IAM access keys via secrets.
 permissions:
   contents: read
 
 jobs:
-  # ─────────────────────────────────────────────────────────────
-  # JOB 1 – validate (runs on every push and PR)
-  # ─────────────────────────────────────────────────────────────
+
+  # ============================================================
+  # JOB 1 - TERRAFORM VALIDATION
+  # ============================================================
   validate:
     name: Validate
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,7 +84,7 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
-      - name: Terraform plan — DEV (no apply)
+      - name: Terraform plan
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_vpc_cidr: "10.0.0.0/16"
@@ -80,17 +94,23 @@ jobs:
           TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
         run: terraform plan -input=false
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 2 – build & push (push to main/master only)
-  # workflow_dispatch skips build — uses the provided image_tag
-  # ─────────────────────────────────────────────────────────────
+
+  # ============================================================
+  # JOB 2 - BUILD AND PUSH DOCKER IMAGE
+  # Runs only for normal pushes.
+  # Manual workflow_dispatch uses an existing image tag.
+  # ============================================================
   build:
     name: Build & Push Image
     runs-on: ubuntu-latest
+
     needs: validate
+
     if: github.event_name == 'push'
+
     outputs:
       image_tag: ${{ steps.meta.outputs.sha_tag }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -103,21 +123,22 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set image tags
         id: meta
         run: |
-          SHA="${{ github.sha }}"
+          SHA="${GITHUB_SHA}"
+
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "IMAGE_LATEST=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest" >> "$GITHUB_ENV"
-          echo "IMAGE_SHA=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${SHA}" >> "$GITHUB_ENV"
+
+          echo "IMAGE_LATEST=${ECR_REGISTRY}/${ECR_REPOSITORY}:latest" >> "$GITHUB_ENV"
+          echo "IMAGE_SHA=${ECR_REGISTRY}/${ECR_REPOSITORY}:${SHA}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: application
@@ -132,24 +153,35 @@ jobs:
       - name: Verify image in ECR
         run: |
           aws ecr describe-images \
-            --repository-name "${{ env.ECR_REPOSITORY }}" \
-            --image-ids imageTag="${{ github.sha }}" \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${GITHUB_SHA}" \
             --query 'imageDetails[0].imageTags' \
             --output text
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 3 – deploy to DEV (rolling instance refresh)
-  # Also triggered by workflow_dispatch when environment == 'dev'
-  # ─────────────────────────────────────────────────────────────
+
+  # ============================================================
+  # JOB 3 - DEPLOY TO ECS FARGATE
+  # ============================================================
   deploy-dev:
-    name: Deploy to DEV
+    name: Deploy to ECS Fargate
     runs-on: ubuntu-latest
-    needs: build
+
+    needs:
+      - validate
+      - build
+
     if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+      always() &&
+      needs.validate.result == 'success' &&
+      (
+        (github.event_name == 'push' && needs.build.result == 'success') ||
+        github.event_name == 'workflow_dispatch'
+      )
+
     environment: dev
+
     steps:
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -157,105 +189,147 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Resolve DEV image tag
+      # ----------------------------------------------------------
+      # Determine which image should be deployed
+      # ----------------------------------------------------------
+      - name: Resolve image tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "IMAGE_TAG=${{ github.event.inputs.image_tag }}" >> "$GITHUB_ENV"
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
           else
-            echo "IMAGE_TAG=${{ needs.build.outputs.image_tag }}" >> "$GITHUB_ENV"
+            IMAGE_TAG="${GITHUB_SHA}"
           fi
 
-      - name: Get DEV Launch Template ID
-        id: lt
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+
+          echo "Deploying image:"
+          echo "${IMAGE_URI}"
+
+      # ----------------------------------------------------------
+      # Verify requested image exists
+      # ----------------------------------------------------------
+      - name: Verify image exists in ECR
         run: |
-          LT_ID=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ env.DEV_ASG_NAME }}" \
-            --query 'AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' \
+          aws ecr describe-images \
+            --repository-name "${ECR_REPOSITORY}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --region "${AWS_REGION}"
+
+      # ----------------------------------------------------------
+      # Download current ECS task definition
+      # ----------------------------------------------------------
+      - name: Get current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${ECS_TASK_DEFINITION}" \
+            --region "${AWS_REGION}" \
+            --query 'taskDefinition' \
+            --output json > task-definition.json
+
+      # ----------------------------------------------------------
+      # Remove AWS-generated fields and replace only the image
+      # ----------------------------------------------------------
+      - name: Prepare new task definition
+        run: |
+          jq \
+            --arg IMAGE "${IMAGE_URI}" \
+            '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            |
+            .containerDefinitions |=
+              map(
+                if .name == env.ECS_CONTAINER_NAME
+                then .image = $IMAGE
+                else .
+                end
+              )
+            ' task-definition.json > new-task-definition.json
+
+          echo "New ECS task definition prepared."
+
+      # ----------------------------------------------------------
+      # Register new ECS task definition revision
+      # ----------------------------------------------------------
+      - name: Register new ECS task definition
+        id: register
+        run: |
+          TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --region "${AWS_REGION}" \
+            --query 'taskDefinition.taskDefinitionArn' \
             --output text)
-          echo "lt_id=${LT_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Create new Launch Template version with updated image tag
-        id: lt_version
+          echo "TASK_DEFINITION_ARN=${TASK_DEFINITION_ARN}" >> "$GITHUB_ENV"
+
+          echo "Registered:"
+          echo "${TASK_DEFINITION_ARN}"
+
+      # ----------------------------------------------------------
+      # Update ECS service
+      # ----------------------------------------------------------
+      - name: Update ECS service
         run: |
-          USERDATA=$(aws ec2 describe-launch-template-versions \
-            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
-            --versions '$Latest' \
-            --query 'LaunchTemplateVersions[0].LaunchTemplateData.UserData' \
-            --output text)
+          aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --task-definition "${TASK_DEFINITION_ARN}" \
+            --region "${AWS_REGION}"
 
-          DECODED=$(echo "$USERDATA" | base64 -d)
-          UPDATED=$(echo "$DECODED" | sed \
-            "s|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:[^ ]*|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}|g")
-          ENCODED=$(echo "$UPDATED" | base64 -w 0)
-
-          NEW_VERSION=$(aws ec2 create-launch-template-version \
-            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
-            --source-version '$Latest' \
-            --launch-template-data "{\"UserData\":\"${ENCODED}\"}" \
-            --query 'LaunchTemplateVersion.VersionNumber' \
-            --output text)
-
-          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Set Launch Template default version
+      # ----------------------------------------------------------
+      # Wait for ECS rolling deployment
+      # ----------------------------------------------------------
+      - name: Wait for ECS service stability
         run: |
-          aws ec2 modify-launch-template \
-            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
-            --default-version "${{ steps.lt_version.outputs.new_version }}"
+          echo "Waiting for ECS service to become stable..."
 
-      - name: Start DEV instance refresh (rolling deploy)
-        id: refresh
+          aws ecs wait services-stable \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --region "${AWS_REGION}"
+
+          echo "ECS deployment completed successfully."
+
+      # ----------------------------------------------------------
+      # Show ECS service status
+      # ----------------------------------------------------------
+      - name: Show ECS deployment status
         run: |
-          REFRESH_ID=$(aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name "${{ env.DEV_ASG_NAME }}" \
-            --preferences '{
-              "MinHealthyPercentage": 50,
-              "InstanceWarmup": 300,
-              "CheckpointPercentages": [50, 100],
-              "CheckpointDelay": 60
+          aws ecs describe-services \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --region "${AWS_REGION}" \
+            --query 'services[0].{
+              Status:status,
+              Desired:desiredCount,
+              Running:runningCount,
+              Pending:pendingCount,
+              TaskDefinition:taskDefinition
             }' \
-            --query 'InstanceRefreshId' \
-            --output text)
-          echo "refresh_id=${REFRESH_ID}" >> "$GITHUB_OUTPUT"
-          echo "DEV instance refresh started: ${REFRESH_ID}"
+            --output table
 
-      - name: Wait for DEV instance refresh to complete
-        run: |
-          REFRESH_ID="${{ steps.refresh.outputs.refresh_id }}"
-          echo "Polling DEV refresh ${REFRESH_ID}..."
-          for i in $(seq 1 40); do
-            STATUS=$(aws autoscaling describe-instance-refreshes \
-              --auto-scaling-group-name "${{ env.DEV_ASG_NAME }}" \
-              --instance-refresh-ids "${REFRESH_ID}" \
-              --query 'InstanceRefreshes[0].Status' \
-              --output text)
-            echo "  [${i}/40] Status: ${STATUS}"
-            case "${STATUS}" in
-              Successful)
-                echo "DEV instance refresh completed successfully."
-                exit 0
-                ;;
-              Failed|Cancelled|RollbackFailed)
-                echo "DEV instance refresh failed with status: ${STATUS}"
-                exit 1
-                ;;
-            esac
-            sleep 30
-          done
-          echo "Timed out waiting for DEV instance refresh."
-          exit 1
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 4 – verify DEV
-  # ─────────────────────────────────────────────────────────────
+  # ============================================================
+  # JOB 4 - VERIFY ECS + ALB
+  # ============================================================
   verify-dev:
-    name: Verify DEV
+    name: Verify ECS Deployment
     runs-on: ubuntu-latest
-    needs: [build, deploy-dev]
-    if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+
+    needs: deploy-dev
+
     steps:
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -263,288 +337,128 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Check DEV ASG instance count
+      # ----------------------------------------------------------
+      # Verify ECS running tasks
+      # ----------------------------------------------------------
+      - name: Check ECS running tasks
         run: |
-          INSERVICE=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ env.DEV_ASG_NAME }}" \
-            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`] | length(@)' \
-            --output text)
-          echo "DEV InService instances: ${INSERVICE}"
-          [ "${INSERVICE}" -ge 2 ] || { echo "Expected >=2 InService instances"; exit 1; }
+          echo "Checking ECS running tasks..."
 
-      - name: Check DEV ALB target group health
+          for i in $(seq 1 12); do
+
+            RUNNING=$(aws ecs describe-services \
+              --cluster "${ECS_CLUSTER}" \
+              --services "${ECS_SERVICE}" \
+              --region "${AWS_REGION}" \
+              --query 'services[0].runningCount' \
+              --output text)
+
+            DESIRED=$(aws ecs describe-services \
+              --cluster "${ECS_CLUSTER}" \
+              --services "${ECS_SERVICE}" \
+              --region "${AWS_REGION}" \
+              --query 'services[0].desiredCount' \
+              --output text)
+
+            echo "[${i}/12] Running=${RUNNING}, Desired=${DESIRED}"
+
+            if [ "${RUNNING}" -eq "${DESIRED}" ] && [ "${RUNNING}" -ge 2 ]; then
+              echo "ECS task count is healthy."
+              break
+            fi
+
+            sleep 15
+
+          done
+
+          if [ "${RUNNING}" -lt 2 ]; then
+            echo "ERROR: ECS does not have 2 running tasks."
+            exit 1
+          fi
+
+      # ----------------------------------------------------------
+      # Find ECS target group
+      # ----------------------------------------------------------
+      - name: Get ECS target group ARN
+        id: target-group
         run: |
           TG_ARN=$(aws elbv2 describe-target-groups \
-            --names "${{ env.DEV_TG_NAME }}" \
+            --names "${ECS_TARGET_GROUP_NAME}" \
+            --region "${AWS_REGION}" \
             --query 'TargetGroups[0].TargetGroupArn' \
             --output text)
 
-          for i in $(seq 1 10); do
+          echo "TG_ARN=${TG_ARN}" >> "$GITHUB_ENV"
+
+          echo "Target group:"
+          echo "${TG_ARN}"
+
+      # ----------------------------------------------------------
+      # Verify healthy Fargate targets
+      # ----------------------------------------------------------
+      - name: Check ECS target health
+        run: |
+          HEALTHY=0
+
+          for i in $(seq 1 12); do
+
             HEALTHY=$(aws elbv2 describe-target-health \
               --target-group-arn "${TG_ARN}" \
+              --region "${AWS_REGION}" \
               --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' \
               --output text)
-            echo "  [${i}/10] DEV healthy targets: ${HEALTHY}"
-            [ "${HEALTHY}" -ge 1 ] && break
-            sleep 30
-          done
-          [ "${HEALTHY}" -ge 1 ] || { echo "No healthy targets in DEV ALB target group"; exit 1; }
 
-      - name: Zero-downtime proof — poll ALB during instance refresh
-        run: |
-          echo "Polling DEV ALB for 3 minutes to demonstrate zero-downtime deployment..."
-          SUCCESS=0
-          FAIL=0
-          for i in $(seq 1 36); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 5 \
-              "http://${{ env.DEV_ALB_DNS }}/" 2>/dev/null || echo "000")
-            TS=$(date -u +%H:%M:%S)
-            if [[ "${HTTP_CODE}" =~ ^[23] ]]; then
-              echo "  ${TS}  [${i}/36]  HTTP ${HTTP_CODE}  OK"
-              SUCCESS=$((SUCCESS + 1))
-            else
-              echo "  ${TS}  [${i}/36]  HTTP ${HTTP_CODE}  FAIL"
-              FAIL=$((FAIL + 1))
-            fi
-            sleep 5
-          done
-          echo "---"
-          echo "Zero-downtime result: ${SUCCESS} successful / ${FAIL} failed requests"
-          [ "${FAIL}" -eq 0 ] || echo "WARNING: ${FAIL} failed requests detected during rolling deployment"
+            echo "[${i}/12] Healthy targets: ${HEALTHY}"
 
-      - name: HTTP health check against DEV ALB
-        run: |
-          for i in $(seq 1 5); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 10 \
-              "http://${{ env.DEV_ALB_DNS }}/")
-            echo "  [${i}/5] DEV HTTP response: ${HTTP_CODE}"
-            if [[ "${HTTP_CODE}" =~ ^[23] ]]; then
-              echo "DEV ALB health check passed (HTTP ${HTTP_CODE})."
-              exit 0
+            if [ "${HEALTHY}" -ge 2 ]; then
+              echo "Both ECS targets are healthy."
+              break
             fi
+
             sleep 15
+
           done
-          echo "DEV ALB health check failed after retries."
-          exit 1
 
-      - name: Verify ECR image exists
-        run: |
-          IMAGE_TAG="${{ needs.build.outputs.image_tag || github.event.inputs.image_tag }}"
-          aws ecr describe-images \
-            --repository-name "${{ env.ECR_REPOSITORY }}" \
-            --image-ids imageTag="${IMAGE_TAG}" \
-            --query 'imageDetails[0].imageTags' \
-            --output text
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 5 – manual approval gate before PROD
-  # Configure required reviewers at:
-  # GitHub → Settings → Environments → prod → Required reviewers
-  # ─────────────────────────────────────────────────────────────
-  approve-prod:
-    name: Approve PROD Deployment
-    runs-on: ubuntu-latest
-    needs: verify-dev
-    if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
-    environment: prod
-    steps:
-      - name: Approval granted
-        run: |
-          echo "Production deployment approved."
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Rollback/manual deploy — image tag: ${{ github.event.inputs.image_tag }}"
-          else
-            echo "Image tag to promote: ${{ needs.build.outputs.image_tag }}"
+          if [ "${HEALTHY}" -lt 2 ]; then
+            echo "ERROR: Less than 2 healthy ECS targets."
+            exit 1
           fi
 
-  # ─────────────────────────────────────────────────────────────
-  # JOB 6 – deploy the SAME image to PROD
-  # ─────────────────────────────────────────────────────────────
-  deploy-prod:
-    name: Deploy to PROD
-    runs-on: ubuntu-latest
-    needs: [build, approve-prod]
-    if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Get PROD Launch Template ID
-        id: lt
+      # ----------------------------------------------------------
+      # Final ALB health check
+      # ----------------------------------------------------------
+      - name: Verify application through ALB
         run: |
-          LT_ID=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ env.PROD_ASG_NAME }}" \
-            --query 'AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId' \
-            --output text)
-          echo "lt_id=${LT_ID}" >> "$GITHUB_OUTPUT"
+          URL="http://${DEV_ALB_DNS}/health"
 
-      - name: Create new PROD Launch Template version with promoted image tag
-        id: lt_version
-        run: |
-          # Promote the exact same SHA image that was verified in DEV.
-          # workflow_dispatch uses the manually supplied image_tag (rollback).
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
-          else
-            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
-          fi
-          echo "Promoting image tag: ${IMAGE_TAG}"
-
-          USERDATA=$(aws ec2 describe-launch-template-versions \
-            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
-            --versions '$Latest' \
-            --query 'LaunchTemplateVersions[0].LaunchTemplateData.UserData' \
-            --output text)
-
-          DECODED=$(echo "$USERDATA" | base64 -d)
-          UPDATED=$(echo "$DECODED" | sed \
-            "s|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:[^ ]*|${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}|g")
-          ENCODED=$(echo "$UPDATED" | base64 -w 0)
-
-          NEW_VERSION=$(aws ec2 create-launch-template-version \
-            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
-            --source-version '$Latest' \
-            --launch-template-data "{\"UserData\":\"${ENCODED}\"}" \
-            --query 'LaunchTemplateVersion.VersionNumber' \
-            --output text)
-
-          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Set PROD Launch Template default version
-        run: |
-          aws ec2 modify-launch-template \
-            --launch-template-id "${{ steps.lt.outputs.lt_id }}" \
-            --default-version "${{ steps.lt_version.outputs.new_version }}"
-
-      - name: Start PROD instance refresh (rolling deploy)
-        id: refresh
-        run: |
-          REFRESH_ID=$(aws autoscaling start-instance-refresh \
-            --auto-scaling-group-name "${{ env.PROD_ASG_NAME }}" \
-            --preferences '{
-              "MinHealthyPercentage": 50,
-              "InstanceWarmup": 300,
-              "CheckpointPercentages": [50, 100],
-              "CheckpointDelay": 60
-            }' \
-            --query 'InstanceRefreshId' \
-            --output text)
-          echo "refresh_id=${REFRESH_ID}" >> "$GITHUB_OUTPUT"
-          echo "PROD instance refresh started: ${REFRESH_ID}"
-
-      - name: Wait for PROD instance refresh to complete
-        run: |
-          REFRESH_ID="${{ steps.refresh.outputs.refresh_id }}"
-          echo "Polling PROD refresh ${REFRESH_ID}..."
-          for i in $(seq 1 40); do
-            STATUS=$(aws autoscaling describe-instance-refreshes \
-              --auto-scaling-group-name "${{ env.PROD_ASG_NAME }}" \
-              --instance-refresh-ids "${REFRESH_ID}" \
-              --query 'InstanceRefreshes[0].Status' \
-              --output text)
-            echo "  [${i}/40] Status: ${STATUS}"
-            case "${STATUS}" in
-              Successful)
-                echo "PROD instance refresh completed successfully."
-                exit 0
-                ;;
-              Failed|Cancelled|RollbackFailed)
-                echo "PROD instance refresh failed with status: ${STATUS}"
-                exit 1
-                ;;
-            esac
-            sleep 30
-          done
-          echo "Timed out waiting for PROD instance refresh."
-          exit 1
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 7 – verify PROD
-  # ─────────────────────────────────────────────────────────────
-  verify-prod:
-    name: Verify PROD
-    runs-on: ubuntu-latest
-    needs: [build, deploy-prod]
-    if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Check PROD ASG instance count
-        run: |
-          INSERVICE=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "${{ env.PROD_ASG_NAME }}" \
-            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`] | length(@)' \
-            --output text)
-          echo "PROD InService instances: ${INSERVICE}"
-          [ "${INSERVICE}" -ge 2 ] || { echo "Expected >=2 PROD InService instances"; exit 1; }
-
-      - name: Check PROD ALB target group health
-        run: |
-          TG_ARN=$(aws elbv2 describe-target-groups \
-            --names "${{ env.PROD_TG_NAME }}" \
-            --query 'TargetGroups[0].TargetGroupArn' \
-            --output text)
+          echo "Testing:"
+          echo "${URL}"
 
           for i in $(seq 1 10); do
-            HEALTHY=$(aws elbv2 describe-target-health \
-              --target-group-arn "${TG_ARN}" \
-              --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' \
-              --output text)
-            echo "  [${i}/10] PROD healthy targets: ${HEALTHY}"
-            [ "${HEALTHY}" -ge 1 ] && break
-            sleep 30
-          done
-          [ "${HEALTHY}" -ge 1 ] || { echo "No healthy targets in PROD ALB target group"; exit 1; }
 
-      - name: Get PROD ALB DNS and HTTP health check
-        run: |
-          PROD_ALB_DNS=$(aws elbv2 describe-load-balancers \
-            --names "full-cicd-deployment-prod-alb" \
-            --query 'LoadBalancers[0].DNSName' \
-            --output text)
-          echo "PROD ALB DNS: ${PROD_ALB_DNS}"
-
-          for i in $(seq 1 5); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            HTTP_CODE=$(curl \
+              -s \
+              -o /tmp/health-response.json \
+              -w "%{http_code}" \
               --max-time 10 \
-              "http://${PROD_ALB_DNS}/")
-            echo "  [${i}/5] PROD HTTP response: ${HTTP_CODE}"
-            if [[ "${HTTP_CODE}" =~ ^[23] ]]; then
-              echo "PROD ALB health check passed (HTTP ${HTTP_CODE})."
+              "${URL}" || true)
+
+            echo "[${i}/10] HTTP ${HTTP_CODE}"
+
+            if [ "${HTTP_CODE}" = "200" ]; then
+
+              echo "Application health check passed."
+
+              echo "Response:"
+              cat /tmp/health-response.json
+
               exit 0
             fi
+
             sleep 15
+
           done
-          echo "PROD ALB health check failed after retries."
+
+          echo "ERROR: Application health check failed."
           exit 1
 
-      - name: Confirm same image tag in PROD as DEV
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
-          else
-            IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
-          fi
-          echo "Confirming ECR image tag ${IMAGE_TAG} exists (same image as DEV)..."
-          aws ecr describe-images \
-            --repository-name "${{ env.ECR_REPOSITORY }}" \
-            --image-ids imageTag="${IMAGE_TAG}" \
-            --query 'imageDetails[0].imageTags' \
-            --output text
