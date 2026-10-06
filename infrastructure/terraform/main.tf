@@ -1,8 +1,5 @@
 data "aws_caller_identity" "current" {}
 
-data "aws_iam_role" "ecs_execution" {
-  name = "ecsTaskExecutionRole"
-}
 
 module "network" {
   source = "./modules/network"
@@ -101,8 +98,8 @@ module "ecs" {
   ecs_task_security_group_id = module.security.ecs_task_security_group_id
   ecs_target_group_arn       = module.alb.ecs_target_group_arn
 
-  ecs_execution_role_arn  = data.aws_iam_role.ecs_execution.arn
-  ecs_execution_role_name = data.aws_iam_role.ecs_execution.name
+  ecs_execution_role_arn  = var.ecs_execution_role_arn
+  ecs_execution_role_name = var.ecs_execution_role_name
 
   db_host       = module.rds.db_endpoint
   db_port       = var.db_port

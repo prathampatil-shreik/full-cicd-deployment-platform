@@ -182,3 +182,15 @@ variable "db_secret_arn" {
   type        = string
   default     = "arn:aws:secretsmanager:us-east-1:925213028316:secret:full-cicd-deployment-platform/dev/database-nyXMta"
 }
+
+variable "ecs_execution_role_arn" {
+  description = "ARN of the ECS task execution IAM role."
+  type        = string
+  default     = "arn:aws:iam::925213028316:role/ecsTaskExecutionRole"
+}
+
+variable "ecs_execution_role_name" {
+  description = "Name of the ECS task execution IAM role."
+  type        = string
+  default     = "ecsTaskExecutionRole"
+}
