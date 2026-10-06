@@ -446,21 +446,20 @@ jobs:
         run: |
           echo "Checking ECS running tasks..."
 
+          RUNNING=0
+          DESIRED=0
+
           for i in $(seq 1 12); do
 
-            RUNNING=$(aws ecs describe-services \
+            SVC=$(aws ecs describe-services \
               --cluster "${ECS_CLUSTER}" \
               --services "${ECS_SERVICE}" \
               --region "${AWS_REGION}" \
-              --query 'services[0].runningCount' \
-              --output text)
+              --query 'services[0].{running:runningCount,desired:desiredCount}' \
+              --output json)
 
-            DESIRED=$(aws ecs describe-services \
-              --cluster "${ECS_CLUSTER}" \
-              --services "${ECS_SERVICE}" \
-              --region "${AWS_REGION}" \
-              --query 'services[0].desiredCount' \
-              --output text)
+            RUNNING=$(echo "${SVC}" | jq -r '.running')
+            DESIRED=$(echo "${SVC}" | jq -r '.desired')
 
             echo "[${i}/12] Running=${RUNNING}, Desired=${DESIRED}"
 
