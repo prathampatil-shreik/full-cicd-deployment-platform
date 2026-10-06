@@ -152,3 +152,32 @@ variable "deregistration_delay" {
   type        = number
   default     = 60
 }
+
+variable "ecs_cpu" {
+  description = "CPU units for the ECS Fargate task."
+  type        = number
+  default     = 256
+}
+
+variable "ecs_memory" {
+  description = "Memory in MiB for the ECS Fargate task."
+  type        = number
+  default     = 512
+}
+
+variable "ecs_desired_count" {
+  description = "Desired number of ECS Fargate tasks."
+  type        = number
+  default     = 2
+}
+
+variable "container_image_tag" {
+  description = "Docker image tag to deploy from ECR."
+  type        = string
+  default     = "latest"
+}
+
+variable "db_secret_arn" {
+  description = "ARN of the Secrets Manager secret containing DB credentials (username, password, dbname)."
+  type        = string
+}

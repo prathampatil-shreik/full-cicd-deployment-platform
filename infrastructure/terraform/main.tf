@@ -1,5 +1,9 @@
 data "aws_caller_identity" "current" {}
 
+data "aws_iam_role" "ecs_execution" {
+  name = "ecsTaskExecutionRole"
+}
+
 module "network" {
   source = "./modules/network"
 
@@ -34,6 +38,7 @@ module "ecr" {
 
 locals {
   ecr_repository_url = var.ecr_repository_url_override != "" ? var.ecr_repository_url_override : module.ecr.repository_url
+  container_image    = "${local.ecr_repository_url}:${var.container_image_tag}"
 }
 
 module "rds" {
@@ -75,6 +80,39 @@ module "alb" {
   depends_on = [
     module.network,
     module.security,
+  ]
+}
+
+module "ecs" {
+  source = "./modules/ecs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  aws_region   = var.aws_region
+
+  ecs_cpu           = var.ecs_cpu
+  ecs_memory        = var.ecs_memory
+  ecs_desired_count = var.ecs_desired_count
+
+  container_image = local.container_image
+  container_port  = 8080
+
+  private_subnet_ids         = module.network.private_subnet_ids
+  ecs_task_security_group_id = module.security.ecs_task_security_group_id
+  ecs_target_group_arn       = module.alb.ecs_target_group_arn
+
+  ecs_execution_role_arn  = data.aws_iam_role.ecs_execution.arn
+  ecs_execution_role_name = data.aws_iam_role.ecs_execution.name
+
+  db_host       = module.rds.db_endpoint
+  db_port       = var.db_port
+  db_secret_arn = var.db_secret_arn
+
+  depends_on = [
+    module.network,
+    module.security,
+    module.alb,
+    module.rds,
   ]
 }
 
