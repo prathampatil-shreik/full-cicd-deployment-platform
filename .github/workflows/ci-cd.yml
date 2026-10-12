@@ -28,19 +28,17 @@ concurrency:
 env:
   AWS_REGION: us-east-1
 
-  ECR_REGISTRY: 925213028316.dkr.ecr.us-east-1.amazonaws.com
+  # ECR repository name — matches the name created by the ECR Terraform module.
+  # Format: <project_name>-<environment>-app
   ECR_REPOSITORY: full-cicd-deployment-platform-dev-app
 
+  # ECS names — must match the names produced by the ECS Terraform module.
   ECS_CLUSTER: full-cicd-deployment-platform-dev
   ECS_SERVICE: full-cicd-deployment-platform-dev-app
   ECS_TASK_DEFINITION: full-cicd-deployment-platform-dev-app
 
   ECS_CONTAINER_NAME: app
   ECS_CONTAINER_PORT: 8080
-
-  ECS_TARGET_GROUP_NAME: full-cicd-deployment-dev-ecs-tg
-
-  DEV_ALB_DNS: full-cicd-deployment-dev-alb-1959686012.us-east-1.elb.amazonaws.com
 
   TF_DIR: infrastructure/terraform
 
@@ -50,7 +48,8 @@ permissions:
 jobs:
 
   # ============================================================
-  # JOB 1 - TERRAFORM VALIDATION
+  # JOB 1 - TERRAFORM VALIDATE
+  # Runs on every push and PR. Does NOT apply.
   # ============================================================
   validate:
     name: Validate
@@ -65,7 +64,13 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS account
+        run: |
+          echo "Verifying AWS credentials..."
+          aws sts get-caller-identity
+          echo "AWS credentials are valid."
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -84,7 +89,7 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
-      - name: Terraform plan
+      - name: Terraform plan (validation only — no apply)
         working-directory: ${{ env.TF_DIR }}
         env:
           TF_VAR_vpc_cidr: "10.0.0.0/16"
@@ -93,19 +98,105 @@ jobs:
           TF_VAR_private_subnet_cidrs: '["10.0.11.0/24","10.0.12.0/24"]'
           TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
           TF_VAR_db_secret_arn: ${{ secrets.DB_SECRET_ARN }}
-        run: terraform plan -input=false
+        run: |
+          # This plan runs without a workspace or var-file so it always shows
+          # a full create plan. That is expected — it validates syntax and
+          # provider compatibility only. The real apply uses the dev workspace
+          # and dev.tfvars in the infra-dev job below.
+          terraform plan -input=false
 
 
   # ============================================================
-  # JOB 2 - BUILD AND PUSH DOCKER IMAGE
-  # Runs only for normal pushes.
-  # Manual workflow_dispatch uses an existing image tag.
+  # JOB 2 - PROVISION / UPDATE DEV INFRASTRUCTURE
+  # Runs terraform apply for the dev environment.
+  # Creates ECR, VPC, ALB, RDS, ECS cluster/service, IAM role.
+  # Must complete before the image is pushed so ECR exists.
+  # ============================================================
+  infra-dev:
+    name: Provision Dev Infrastructure
+    runs-on: ubuntu-latest
+
+    needs: validate
+
+    # Only apply on pushes to main/master, not on PRs.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    environment: dev
+
+    outputs:
+      ecr_repository_url: ${{ steps.tf-outputs.outputs.ecr_repository_url }}
+      alb_dns_name: ${{ steps.tf-outputs.outputs.alb_dns_name }}
+      ecs_target_group_name: ${{ steps.tf-outputs.outputs.ecs_target_group_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS account
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Select or create dev workspace
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform workspace select dev 2>/dev/null || terraform workspace new dev
+
+      - name: Terraform apply — dev
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_db_secret_arn: ${{ secrets.DB_SECRET_ARN }}
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            -var-file="environments/dev/dev.tfvars"
+
+      - name: Read Terraform outputs
+        id: tf-outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          ECR_URL=$(terraform output -raw ecr_repository_url)
+          ALB_DNS=$(terraform output -raw alb_dns_name)
+          TG_NAME=$(terraform output -raw ecs_target_group_name)
+
+          echo "ecr_repository_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
+          echo "alb_dns_name=${ALB_DNS}"        >> "$GITHUB_OUTPUT"
+          echo "ecs_target_group_name=${TG_NAME}" >> "$GITHUB_OUTPUT"
+
+          echo "ECR URL   : ${ECR_URL}"
+          echo "ALB DNS   : ${ALB_DNS}"
+          echo "TG Name   : ${TG_NAME}"
+
+
+  # ============================================================
+  # JOB 3 - BUILD AND PUSH DOCKER IMAGE
+  # Runs after infra-dev so ECR is guaranteed to exist.
+  # Manual workflow_dispatch uses an existing image tag — skips build.
   # ============================================================
   build:
     name: Build & Push Image
     runs-on: ubuntu-latest
 
-    needs: validate
+    needs:
+      - validate
+      - infra-dev
 
     if: github.event_name == 'push'
 
@@ -121,20 +212,22 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set image tags
         id: meta
         run: |
           SHA="${GITHUB_SHA}"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
 
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
 
-          echo "IMAGE_LATEST=${ECR_REGISTRY}/${ECR_REPOSITORY}:latest" >> "$GITHUB_ENV"
-          echo "IMAGE_SHA=${ECR_REGISTRY}/${ECR_REPOSITORY}:${SHA}" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=${REGISTRY}/${ECR_REPOSITORY}:latest" >> "$GITHUB_ENV"
+          echo "IMAGE_SHA=${REGISTRY}/${ECR_REPOSITORY}:${SHA}"    >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -161,19 +254,19 @@ jobs:
 
 
   # ============================================================
-  # JOB 3 - DEPLOY TO ECS FARGATE
+  # JOB 4 - DEPLOY TO ECS FARGATE (DEV)
   # ============================================================
   deploy-dev:
-    name: Deploy to ECS Fargate
+    name: Deploy to ECS Fargate (Dev)
     runs-on: ubuntu-latest
 
     needs:
-      - validate
+      - infra-dev
       - build
 
     if: |
       always() &&
-      needs.validate.result == 'success' &&
+      needs.infra-dev.result == 'success' &&
       (
         (github.event_name == 'push' && needs.build.result == 'success') ||
         github.event_name == 'workflow_dispatch'
@@ -188,7 +281,11 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       # ----------------------------------------------------------
       # Determine which image should be deployed
@@ -201,15 +298,16 @@ jobs:
             IMAGE_TAG="${GITHUB_SHA}"
           fi
 
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
-          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${IMAGE_TAG}"   >> "$GITHUB_ENV"
+          echo "IMAGE_URI=${IMAGE_URI}"   >> "$GITHUB_ENV"
 
           echo "Deploying image: ${IMAGE_URI}"
 
       # ----------------------------------------------------------
-      # Verify requested image exists
+      # Verify requested image exists in ECR
       # ----------------------------------------------------------
       - name: Verify image exists in ECR
         run: |
@@ -294,23 +392,9 @@ jobs:
 
       # ----------------------------------------------------------
       # Wait for ECS rolling deployment to complete.
-      #
-      # WHY a custom loop instead of `aws ecs wait services-stable`:
-      #   The AWS CLI waiter has a hard limit of 40 retries × 15 s = 600 s.
-      #   A zero-downtime rolling deploy with desired_count=2,
-      #   minimumHealthyPercent=100, and ALB health checks (interval=30s,
-      #   healthy_threshold=2) takes up to ~8 minutes after the
-      #   deregistration_delay is reduced to 60 s.
-      #   The CLI waiter expires before ECS finishes — not because ECS
-      #   failed, but because the waiter ceiling is too low.
-      #
-      # This loop:
-      #   - Polls every 15 seconds for up to 20 minutes (80 iterations)
-      #   - Prints live deployment status and recent service events
-      #   - Succeeds when: runningCount==desiredCount AND pendingCount==0
-      #     AND the PRIMARY deployment rolloutState==COMPLETED
-      #   - Fails immediately if rolloutState==FAILED
-      #   - Fails with a diagnostic dump if the timeout is reached
+      # Custom loop replaces `aws ecs wait services-stable` which
+      # has a hard 600 s ceiling — too short for a rolling deploy
+      # with minimumHealthyPercent=100 and ALB drain time.
       # ----------------------------------------------------------
       - name: Wait for ECS deployment to complete
         run: |
@@ -328,7 +412,6 @@ jobs:
 
           for i in $(seq 1 ${MAX_ITERATIONS}); do
 
-            # ── Fetch service state ──────────────────────────────
             SERVICE_JSON=$(aws ecs describe-services \
               --cluster "${ECS_CLUSTER}" \
               --services "${ECS_SERVICE}" \
@@ -339,7 +422,6 @@ jobs:
             RUNNING=$(echo "${SERVICE_JSON}" | jq -r '.services[0].runningCount')
             PENDING=$(echo "${SERVICE_JSON}" | jq -r '.services[0].pendingCount')
 
-            # Primary deployment (the one we just triggered)
             PRIMARY_JSON=$(echo "${SERVICE_JSON}" | \
               jq -r '.services[0].deployments[] | select(.status=="PRIMARY")')
 
@@ -350,7 +432,6 @@ jobs:
             TS=$(date -u +"%H:%M:%S")
             echo "[${i}/${MAX_ITERATIONS}] ${TS} | desired=${DESIRED} running=${RUNNING} pending=${PENDING} | primary: running=${PRIMARY_RUNNING}/${PRIMARY_DESIRED} rollout=${ROLLOUT_STATE}"
 
-            # ── Print any new service events ─────────────────────
             NEW_EVENTS=$(echo "${SERVICE_JSON}" | \
               jq -r --arg LAST "${LAST_EVENT_TIME}" \
               '.services[0].events[]
@@ -363,7 +444,6 @@ jobs:
                 jq -r '.services[0].events[0].createdAt // ""')
             fi
 
-            # ── Check for hard failure ───────────────────────────
             if [ "${ROLLOUT_STATE}" = "FAILED" ]; then
               echo ""
               echo "ERROR: ECS deployment FAILED (rolloutState=FAILED)."
@@ -373,7 +453,6 @@ jobs:
               exit 1
             fi
 
-            # ── Check for success ────────────────────────────────
             if [ "${ROLLOUT_STATE}" = "COMPLETED" ] \
               && [ "${RUNNING}" = "${DESIRED}" ] \
               && [ "${PENDING}" = "0" ]; then
@@ -389,11 +468,8 @@ jobs:
 
           done
 
-          # ── Timeout reached ──────────────────────────────────────
           echo ""
-          echo "ERROR: Timed out after $((MAX_ITERATIONS * SLEEP_SECONDS)) seconds waiting for ECS stability."
-          echo ""
-          echo "Final service state:"
+          echo "ERROR: Timed out after $((MAX_ITERATIONS * SLEEP_SECONDS)) seconds."
           aws ecs describe-services \
             --cluster "${ECS_CLUSTER}" \
             --services "${ECS_SERVICE}" \
@@ -422,13 +498,15 @@ jobs:
 
 
   # ============================================================
-  # JOB 4 - VERIFY ECS + ALB
+  # JOB 5 - VERIFY ECS + ALB (DEV)
   # ============================================================
   verify-dev:
-    name: Verify ECS Deployment
+    name: Verify ECS Deployment (Dev)
     runs-on: ubuntu-latest
 
-    needs: deploy-dev
+    needs:
+      - infra-dev
+      - deploy-dev
 
     steps:
 
@@ -437,7 +515,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       # ----------------------------------------------------------
       # Verify ECS running tasks
@@ -478,13 +556,15 @@ jobs:
           fi
 
       # ----------------------------------------------------------
-      # Find ECS target group
+      # Find ECS target group — derived from infra-dev output
       # ----------------------------------------------------------
       - name: Get ECS target group ARN
         id: target-group
         run: |
+          ECS_TG_NAME="${{ needs.infra-dev.outputs.ecs_target_group_name }}"
+
           TG_ARN=$(aws elbv2 describe-target-groups \
-            --names "${ECS_TARGET_GROUP_NAME}" \
+            --names "${ECS_TG_NAME}" \
             --region "${AWS_REGION}" \
             --query 'TargetGroups[0].TargetGroupArn' \
             --output text)
@@ -525,11 +605,12 @@ jobs:
           fi
 
       # ----------------------------------------------------------
-      # Final ALB health check
+      # Final ALB health check — ALB DNS derived from Terraform output
       # ----------------------------------------------------------
       - name: Verify application through ALB
         run: |
-          URL="http://${DEV_ALB_DNS}/health"
+          ALB_DNS="${{ needs.infra-dev.outputs.alb_dns_name }}"
+          URL="http://${ALB_DNS}/health"
 
           echo "Testing: ${URL}"
 

@@ -43,6 +43,11 @@ output "ecs_target_group_arn" {
   value       = module.alb.ecs_target_group_arn
 }
 
+output "ecs_target_group_name" {
+  description = "Name of the ECS ip-type ALB target group (used by the pipeline verify step)."
+  value       = module.alb.ecs_target_group_name
+}
+
 output "ecs_cluster_name" {
   description = "Name of the ECS cluster."
   value       = module.ecs.cluster_name
@@ -66,4 +71,9 @@ output "ecs_task_security_group_id" {
 output "ecs_log_group_name" {
   description = "CloudWatch log group name for ECS container logs."
   value       = module.ecs.log_group_name
+}
+
+output "ecs_execution_role_arn" {
+  description = "ARN of the Terraform-managed ECS task execution IAM role."
+  value       = module.ecs.ecs_execution_role_arn
 }

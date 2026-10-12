@@ -1,5 +1,5 @@
 data "aws_caller_identity" "current" {}
-
+data "aws_partition" "current" {}
 
 module "network" {
   source = "./modules/network"
@@ -34,6 +34,9 @@ module "ecr" {
 }
 
 locals {
+  # PROD reuses the DEV ECR repository URL so the same immutable image digest
+  # is promoted without rebuilding. Supply ecr_repository_url_override only in
+  # prod.tfvars — leave it empty ("") for dev so the ECR module URL is used.
   ecr_repository_url = var.ecr_repository_url_override != "" ? var.ecr_repository_url_override : module.ecr.repository_url
   container_image    = "${local.ecr_repository_url}:${var.container_image_tag}"
 }
@@ -97,9 +100,6 @@ module "ecs" {
   private_subnet_ids         = module.network.private_subnet_ids
   ecs_task_security_group_id = module.security.ecs_task_security_group_id
   ecs_target_group_arn       = module.alb.ecs_target_group_arn
-
-  ecs_execution_role_arn  = var.ecs_execution_role_arn
-  ecs_execution_role_name = var.ecs_execution_role_name
 
   db_host       = module.rds.db_endpoint
   db_port       = var.db_port

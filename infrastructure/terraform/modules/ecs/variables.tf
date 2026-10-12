@@ -58,16 +58,6 @@ variable "ecs_target_group_arn" {
   type        = string
 }
 
-variable "ecs_execution_role_arn" {
-  description = "ARN of the ECS task execution IAM role."
-  type        = string
-}
-
-variable "ecs_execution_role_name" {
-  description = "Name of the ECS task execution IAM role (for policy attachment)."
-  type        = string
-}
-
 variable "db_host" {
   description = "RDS database hostname."
   type        = string
@@ -80,6 +70,11 @@ variable "db_port" {
 }
 
 variable "db_secret_arn" {
-  description = "ARN of the Secrets Manager secret containing DB credentials."
+  description = "ARN of the Secrets Manager secret containing DB credentials (username, password, dbname)."
   type        = string
+
+  validation {
+    condition     = can(regex("^arn:aws:secretsmanager:", var.db_secret_arn))
+    error_message = "db_secret_arn must be a valid Secrets Manager ARN starting with arn:aws:secretsmanager:"
+  }
 }

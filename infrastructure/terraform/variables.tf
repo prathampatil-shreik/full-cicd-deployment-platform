@@ -64,7 +64,7 @@ variable "db_username" {
 }
 
 variable "db_password" {
-  description = "RDS master password."
+  description = "RDS master password. Supply via TF_VAR_db_password environment variable or a secrets-backed tfvars file. Never commit the value."
   type        = string
   sensitive   = true
 }
@@ -136,7 +136,7 @@ variable "instance_type" {
 }
 
 variable "ecr_repository_url_override" {
-  description = "Override the ECR repository URL. Used by PROD to reuse the DEV ECR repo instead of creating a separate one."
+  description = "Override the ECR repository URL. Used by PROD to reuse the DEV ECR repo instead of creating a separate one. Leave empty for dev."
   type        = string
   default     = ""
 }
@@ -172,25 +172,17 @@ variable "ecs_desired_count" {
 }
 
 variable "container_image_tag" {
-  description = "Docker image tag to deploy from ECR."
+  description = "Docker image tag to deploy from ECR. Updated by the pipeline on each deploy."
   type        = string
   default     = "latest"
 }
 
 variable "db_secret_arn" {
-  description = "ARN of the Secrets Manager secret containing DB credentials (username, password, dbname)."
+  description = "ARN of the Secrets Manager secret containing DB credentials (username, password, dbname). Must be created manually in the target AWS account before running Terraform. Supply via TF_VAR_db_secret_arn or environment-specific tfvars."
   type        = string
-  default     = "arn:aws:secretsmanager:us-east-1:925213028316:secret:full-cicd-deployment-platform/dev/database-nyXMta"
-}
 
-variable "ecs_execution_role_arn" {
-  description = "ARN of the ECS task execution IAM role."
-  type        = string
-  default     = "arn:aws:iam::925213028316:role/ecsTaskExecutionRole"
-}
-
-variable "ecs_execution_role_name" {
-  description = "Name of the ECS task execution IAM role."
-  type        = string
-  default     = "ecsTaskExecutionRole"
+  validation {
+    condition     = can(regex("^arn:aws:secretsmanager:", var.db_secret_arn))
+    error_message = "db_secret_arn must be a valid Secrets Manager ARN starting with arn:aws:secretsmanager:"
+  }
 }

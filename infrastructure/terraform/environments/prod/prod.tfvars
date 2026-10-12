@@ -21,7 +21,8 @@ private_subnet_cidrs = [
 
 db_name     = "appdb"
 db_username = "appadmin"
-db_port     = 5432
+# db_password is NOT stored here. Supply via TF_VAR_db_password (GitHub secret).
+db_port = 5432
 
 rds_engine_version          = "16.4"
 rds_instance_class          = "db.t3.micro"
@@ -35,6 +36,20 @@ asg_max_size         = 4
 
 cpu_scale_target = 60
 
-# Reuse the DEV ECR repository — PROD pulls the same image that was built and
-# verified in DEV. No separate ECR repo is created for PROD.
-ecr_repository_url_override = "925213028316.dkr.ecr.us-east-1.amazonaws.com/full-cicd-deployment-platform-dev-app"
+# ── ECS ───────────────────────────────────────────────────────────────────────
+ecs_cpu             = 256
+ecs_memory          = 512
+ecs_desired_count   = 2
+health_check_path   = "/health"
+container_image_tag = "latest"
+
+# PROD reuses the DEV ECR repository so the same immutable image digest is
+# promoted without rebuilding. The pipeline sets this at apply time via:
+#   TF_VAR_ecr_repository_url_override = <dev ECR URL from Terraform output>
+# Leave empty here; the pipeline injects the correct value.
+ecr_repository_url_override = ""
+
+# ARN of the Secrets Manager secret holding DB credentials for prod.
+# Create this secret manually in the new AWS account before running prod Terraform.
+# Then set PROD_DB_SECRET_ARN as a GitHub Actions secret.
+db_secret_arn = "REPLACE_WITH_PROD_SECRET_ARN"
