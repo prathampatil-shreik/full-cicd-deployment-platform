@@ -35,9 +35,6 @@ ecs_desired_count   = 2
 health_check_path   = "/health"
 container_image_tag = "latest"
 
-# ARN of the Secrets Manager secret holding DB credentials for dev.
-# Create this secret manually in the new AWS account before running Terraform.
-# Format: {"username":"appadmin","password":"<value>","dbname":"appdb"}
-# Then set this ARN as the GitHub Actions secret DB_SECRET_ARN.
-# The value below is a placeholder — replace with the real ARN after creation.
-db_secret_arn = "REPLACE_WITH_NEW_ACCOUNT_SECRET_ARN"
+# db_secret_arn is NOT stored here. Supply it via:
+#   - GitHub Actions secret DB_SECRET_ARN (set as TF_VAR_db_secret_arn)
+#   - Locally: export TF_VAR_db_secret_arn="arn:aws:secretsmanager:..."
