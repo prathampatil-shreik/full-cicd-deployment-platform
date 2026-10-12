@@ -27,3 +27,8 @@ import {
   to = module.ecs.aws_ecs_cluster.this
   id = "full-cicd-deployment-platform-dev"
 }
+
+import {
+  to = module.ecs.aws_ecs_service.app
+  id = "full-cicd-deployment-platform-dev/full-cicd-deployment-platform-dev-app"
+}
