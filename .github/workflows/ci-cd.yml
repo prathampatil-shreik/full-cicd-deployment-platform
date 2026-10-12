@@ -399,10 +399,10 @@ jobs:
           echo "Cluster : ${ECS_CLUSTER}"
           echo "Service : ${ECS_SERVICE}"
           echo "Task def: ${TASK_DEFINITION_ARN}"
-          echo "Timeout : 20 minutes"
+          echo "Timeout : 30 minutes"
           echo "========================================"
 
-          MAX_ITERATIONS=80   # 80 × 15 s = 1200 s = 20 minutes
+          MAX_ITERATIONS=120   # 120 × 15 s = 1800 s = 30 minutes
           SLEEP_SECONDS=15
           LAST_EVENT_TIME=""
 

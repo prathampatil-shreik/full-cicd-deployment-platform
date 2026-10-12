@@ -29,8 +29,8 @@ db_port = 5432
 ecr_repository_url_override = ""
 
 # ── ECS ───────────────────────────────────────────────────────────────────────
-ecs_cpu             = 256
-ecs_memory          = 512
+ecs_cpu             = 512
+ecs_memory          = 1024
 ecs_desired_count   = 2
 health_check_path   = "/health"
 container_image_tag = "latest"
