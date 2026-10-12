@@ -1,7 +1,7 @@
 variable "aws_region" {
   description = "AWS region where the infrastructure will be deployed."
   type        = string
-  default     = "us-east-1"
+  default     = "eu-north-1"
 }
 
 variable "project_name" {
@@ -78,7 +78,7 @@ variable "db_port" {
 variable "rds_engine_version" {
   description = "PostgreSQL engine version."
   type        = string
-  default     = "16.4"
+  default     = "16.15"
 }
 
 variable "rds_instance_class" {
@@ -103,36 +103,6 @@ variable "rds_backup_retention_period" {
   description = "RDS automated backup retention in days."
   type        = number
   default     = 7
-}
-
-variable "asg_min_size" {
-  description = "Minimum application instances."
-  type        = number
-  default     = 2
-}
-
-variable "asg_desired_capacity" {
-  description = "Desired application instances."
-  type        = number
-  default     = 2
-}
-
-variable "asg_max_size" {
-  description = "Maximum application instances."
-  type        = number
-  default     = 4
-}
-
-variable "cpu_scale_target" {
-  description = "CPU utilisation percentage target for ASG target-tracking scaling policy."
-  type        = number
-  default     = 60
-}
-
-variable "instance_type" {
-  description = "EC2 instance type for application servers."
-  type        = string
-  default     = "t3.micro"
 }
 
 variable "ecr_repository_url_override" {

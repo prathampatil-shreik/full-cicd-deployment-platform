@@ -17,6 +17,7 @@ override.tf.json
 # Sensitive variable files
 *.tfvars
 !infrastructure/terraform/terraform.tfvars.example
+!infrastructure/terraform/environments/dev/dev.tfvars
 !infrastructure/terraform/environments/prod/prod.tfvars
 
 # =============================================================================

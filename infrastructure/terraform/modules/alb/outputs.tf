@@ -18,16 +18,6 @@ output "alb_zone_id" {
   value       = aws_lb.app.zone_id
 }
 
-output "target_group_arn" {
-  description = "ARN of the legacy EC2 instance target group."
-  value       = aws_lb_target_group.app.arn
-}
-
-output "target_group_name" {
-  description = "Name of the legacy EC2 instance target group."
-  value       = aws_lb_target_group.app.name
-}
-
 output "ecs_target_group_arn" {
   description = "ARN of the ECS ip-type target group."
   value       = aws_lb_target_group.ecs.arn

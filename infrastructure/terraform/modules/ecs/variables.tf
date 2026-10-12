@@ -11,7 +11,7 @@ variable "environment" {
 variable "aws_region" {
   description = "AWS region for CloudWatch log configuration."
   type        = string
-  default     = "us-east-1"
+  default     = "eu-north-1"
 }
 
 variable "ecs_cpu" {

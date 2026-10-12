@@ -22,40 +22,6 @@ resource "aws_lb" "app" {
   }
 }
 
-# Legacy EC2 instance target group — kept so existing state is not destroyed.
-# The listener forwards to the ECS target group below.
-resource "aws_lb_target_group" "app" {
-  name        = "${local.name_prefix}-${var.environment}-tg"
-  port        = var.target_port
-  protocol    = "HTTP"
-  vpc_id      = var.vpc_id
-  target_type = "instance"
-
-  health_check {
-    enabled             = true
-    path                = "/"
-    protocol            = "HTTP"
-    port                = "8080"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    timeout             = 5
-    interval            = 30
-    matcher             = "200-399"
-  }
-
-  tags = {
-    Name        = "${var.project_name}-${var.environment}-tg"
-    Project     = var.project_name
-    Environment = var.environment
-    ManagedBy   = "Terraform"
-    Tier        = "application"
-  }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
 # ECS Fargate target group.
 # target_type = "ip" is required for Fargate ENI-based networking.
 # deregistration_delay = 60 replaces the AWS default of 300 s.

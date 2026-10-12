@@ -26,7 +26,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: eu-north-1
 
   # ECR repository name — matches the name created by the ECR Terraform module.
   # Format: <project_name>-<environment>-app
@@ -92,18 +92,14 @@ jobs:
       - name: Terraform plan (validation only — no apply)
         working-directory: ${{ env.TF_DIR }}
         env:
-          TF_VAR_vpc_cidr: "10.0.0.0/16"
-          TF_VAR_availability_zones: '["us-east-1a","us-east-1b"]'
-          TF_VAR_public_subnet_cidrs: '["10.0.1.0/24","10.0.2.0/24"]'
-          TF_VAR_private_subnet_cidrs: '["10.0.11.0/24","10.0.12.0/24"]'
           TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
           TF_VAR_db_secret_arn: ${{ secrets.DB_SECRET_ARN }}
         run: |
-          # This plan runs without a workspace or var-file so it always shows
-          # a full create plan. That is expected — it validates syntax and
-          # provider compatibility only. The real apply uses the dev workspace
-          # and dev.tfvars in the infra-dev job below.
-          terraform plan -input=false
+          # Validates syntax and provider compatibility using the same var-file
+          # as the real apply. db_password and db_secret_arn are injected via
+          # TF_VAR_* because they are secrets and must not be in any file.
+          terraform plan -input=false \
+            -var-file="environments/dev/dev.tfvars"
 
 
   # ============================================================

@@ -1,12 +1,12 @@
-aws_region   = "us-east-1"
+aws_region   = "eu-north-1"
 project_name = "full-cicd-deployment-platform"
 environment  = "prod"
 
 vpc_cidr = "10.1.0.0/16"
 
 availability_zones = [
-  "us-east-1a",
-  "us-east-1b",
+  "eu-north-1a",
+  "eu-north-1b",
 ]
 
 public_subnet_cidrs = [
@@ -24,17 +24,11 @@ db_username = "appadmin"
 # db_password is NOT stored here. Supply via TF_VAR_db_password (GitHub secret).
 db_port = 5432
 
-rds_engine_version          = "16.4"
+rds_engine_version          = "16.15"
 rds_instance_class          = "db.t3.micro"
 rds_allocated_storage       = 20
 rds_max_allocated_storage   = 50
 rds_backup_retention_period = 7
-
-asg_min_size         = 2
-asg_desired_capacity = 2
-asg_max_size         = 4
-
-cpu_scale_target = 60
 
 # ── ECS ───────────────────────────────────────────────────────────────────────
 ecs_cpu             = 256
