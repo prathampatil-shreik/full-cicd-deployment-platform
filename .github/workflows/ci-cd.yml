@@ -556,42 +556,84 @@ jobs:
               "$REGISTRY"
 
       # ----------------------------------------------------------
-      # 3. Copy the source image to prod ECR under the promotion
-      #    tag. skopeo copy resolves the source tag (OCI index or
-      #    plain manifest) and copies the platform manifest to the
-      #    destination. The promotion tag (prod-<SHA>) is always
-      #    fresh — no collision with any previous attempt.
+      # 3. Capture the raw manifest digest of the source tag.
+      #    --raw returns the exact bytes ECR stores for that tag
+      #    (the OCI image index when Buildx is used). Hashing
+      #    those bytes gives the content-addressed digest.
+      #    pipefail ensures a skopeo failure is not swallowed.
+      # ----------------------------------------------------------
+      - name: Capture source manifest digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          SRC_RAW=$(skopeo inspect --raw \
+            "docker://${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}")
+
+          if [ -z "$SRC_RAW" ]; then
+            echo "ERROR: skopeo inspect --raw returned empty output for source tag."
+            exit 1
+          fi
+
+          SRC_DIGEST="sha256:$(printf '%s' "$SRC_RAW" | sha256sum | awk '{print $1}')"
+          echo "Source raw manifest digest: ${SRC_DIGEST}"
+          echo "SRC_DIGEST=${SRC_DIGEST}" >> "$GITHUB_ENV"
+
+      # ----------------------------------------------------------
+      # 4. Copy the full image index and all platform manifests
+      #    to prod ECR under the promotion tag.
+      #    --all copies the OCI index + every child manifest.
+      #    --preserve-digests writes each object under its
+      #    content-addressed digest so the index digest in prod
+      #    ECR matches the index digest in dev ECR exactly.
+      #    The promotion tag (prod-<SHA>) is always fresh.
       # ----------------------------------------------------------
       - name: Copy image to production ECR
+        shell: bash
         run: |
+          set -euo pipefail
           REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           SRC="docker://${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}"
           DEST="docker://${REGISTRY}/${PROD_ECR_REPOSITORY}:${PROMO_TAG}"
 
           echo "Source      : ${SRC}"
           echo "Destination : ${DEST}"
-          skopeo copy "$SRC" "$DEST"
+          skopeo copy --all --preserve-digests "$SRC" "$DEST"
 
       # ----------------------------------------------------------
-      # 4. Verify the promotion tag exists in prod ECR.
-      #    ECR's describe-images is the authoritative check —
-      #    it confirms the tag is registered and the manifest is
-      #    stored, without any digest comparison that can fail due
-      #    to OCI index vs platform manifest ambiguity.
-      #    The production ECS service is NOT updated until this
-      #    step exits 0.
+      # 5. Verify by hashing the raw manifest of the destination
+      #    tag using the exact same method as step 3.
+      #    Both sides hash the OCI index bytes — guaranteed
+      #    apples-to-apples. ECS is NOT updated until this exits 0.
       # ----------------------------------------------------------
       - name: Verify image in prod ECR
+        shell: bash
         run: |
-          echo "Verifying promotion tag '${PROMO_TAG}' exists in prod ECR..."
-          aws ecr describe-images \
-            --region "$AWS_REGION" \
-            --repository-name "$PROD_ECR_REPOSITORY" \
-            --image-ids imageTag="${PROMO_TAG}" \
-            --query 'imageDetails[0].{digest:imageDigest,tags:imageTags,pushed:imagePushedAt}' \
-            --output json
+          set -euo pipefail
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-          echo "Promotion tag verified. Production ECS update may proceed."
+          DEST_RAW=$(skopeo inspect --raw \
+            "docker://${REGISTRY}/${PROD_ECR_REPOSITORY}:${PROMO_TAG}")
+
+          if [ -z "$DEST_RAW" ]; then
+            echo "ERROR: skopeo inspect --raw returned empty output for dest tag."
+            echo "The production ECS service has NOT been updated."
+            exit 1
+          fi
+
+          DEST_DIGEST="sha256:$(printf '%s' "$DEST_RAW" | sha256sum | awk '{print $1}')"
+
+          echo "Source digest : ${SRC_DIGEST}"
+          echo "Dest digest   : ${DEST_DIGEST}"
+
+          if [ "$SRC_DIGEST" != "$DEST_DIGEST" ]; then
+            echo "ERROR: digest mismatch — prod manifest does not match dev source."
+            echo "The production ECS service has NOT been updated."
+            exit 1
+          fi
+
+          echo "Manifest digest verified. Production ECS update may proceed."
 
       # ----------------------------------------------------------
       # 7. Retrieve existing prod task definition
