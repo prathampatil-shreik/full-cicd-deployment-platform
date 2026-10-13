@@ -8,16 +8,16 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg: #0f1117;
-      --surface: #1a1d27;
-      --surface2: #22263a;
-      --border: #2e3250;
-      --accent: #6366f1;
-      --accent-hover: #4f52d4;
-      --danger: #ef4444;
-      --success: #22c55e;
+      --bg: #0a0e1a;
+      --surface: #111827;
+      --surface2: #1a2235;
+      --border: #1e3a5f;
+      --accent: #06b6d4;
+      --accent-hover: #0891b2;
+      --danger: #f43f5e;
+      --success: #10b981;
       --warn: #f59e0b;
-      --text: #e2e8f0;
+      --text: #f0f6ff;
       --muted: #64748b;
       --radius: 10px;
     }
@@ -42,8 +42,10 @@
       top: 0;
       z-index: 100;
     }
-    .logo { font-size: 1.2rem; font-weight: 700; color: var(--accent); letter-spacing: -0.5px; }
-    .logo span { color: var(--text); font-weight: 400; }
+    .logo { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.5px;
+             background: linear-gradient(90deg, #06b6d4, #818cf8);
+             -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .logo span { font-weight: 400; }
     .env-badge {
       font-size: 0.7rem;
       font-weight: 600;
@@ -168,7 +170,7 @@
       align-items: start;
       transition: border-color 0.15s;
     }
-    .task-card:hover { border-color: var(--accent); }
+    .task-card:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent)22; }
 
     .task-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 3px; }
     .task-desc { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
@@ -183,12 +185,12 @@
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    .badge-TODO       { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+    .badge-TODO       { background: #0f1f3d; color: #7dd3fc; border: 1px solid #1e3a5f; }
     .badge-IN_PROGRESS{ background: #1c1a0e; color: var(--warn); border: 1px solid #78350f; }
-    .badge-DONE       { background: #0f2318; color: var(--success); border: 1px solid #14532d; }
-    .badge-LOW        { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+    .badge-DONE       { background: #022c22; color: #34d399; border: 1px solid #065f46; }
+    .badge-LOW        { background: #0f1f3d; color: #7dd3fc; border: 1px solid #1e3a5f; }
     .badge-MEDIUM     { background: #1c1a0e; color: var(--warn); border: 1px solid #78350f; }
-    .badge-HIGH       { background: #2d0f0f; color: var(--danger); border: 1px solid #7f1d1d; }
+    .badge-HIGH       { background: #2d0a1a; color: #fb7185; border: 1px solid #9f1239; }
 
     .task-actions { display: flex; gap: 0.5rem; align-items: flex-start; }
 
@@ -252,7 +254,10 @@
       padding: 1rem 1.25rem;
       text-align: center;
     }
-    .stat-card .num { font-size: 1.8rem; font-weight: 700; }
+    .stat-card .num { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+    .stat-card:nth-child(2) .num { color: #7dd3fc; }
+    .stat-card:nth-child(3) .num { color: var(--warn); }
+    .stat-card:nth-child(4) .num { color: #34d399; }
     .stat-card .lbl { font-size: 0.75rem; color: var(--muted); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
 
     @media (max-width: 640px) {
@@ -266,7 +271,7 @@
 <body>
 
 <header>
-  <div class="logo">Task<span>Flow</span></div>
+  <div class="logo">Task<span>Flow ✦</span></div>
   <div class="header-right">
     <span class="version-tag" id="versionTag">v—</span>
     <span class="env-badge" id="envBadge">—</span>
