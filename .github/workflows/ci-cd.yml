@@ -10,36 +10,37 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Existing ECR image tag to deploy or rollback"
+        description: "Existing dev ECR image tag to deploy (dev) or promote (prod)"
         required: true
         type: string
       environment:
         description: "Target environment"
         required: true
-        default: "dev"
+        default: dev
         type: choice
         options:
           - dev
+          - prod
 
 concurrency:
-  group: cicd-${{ github.ref }}
+  group: cicd-${{ github.ref }}-${{ github.event.inputs.environment || 'dev' }}
   cancel-in-progress: false
 
 env:
   AWS_REGION: eu-north-1
+  AWS_ACCOUNT_ID: "284043563957"
 
-  # ECR repository name — matches the name created by the ECR Terraform module.
-  # Format: <project_name>-<environment>-app
-  ECR_REPOSITORY: full-cicd-deployment-platform-dev-app
+  DEV_ECR_REPOSITORY: full-cicd-deployment-platform-dev-app
+  DEV_ECS_CLUSTER: full-cicd-deployment-platform-dev
+  DEV_ECS_SERVICE: full-cicd-deployment-platform-dev-app
+  DEV_ECS_TASK_DEFINITION: full-cicd-deployment-platform-dev-app
 
-  # ECS names — must match the names produced by the ECS Terraform module.
-  ECS_CLUSTER: full-cicd-deployment-platform-dev
-  ECS_SERVICE: full-cicd-deployment-platform-dev-app
-  ECS_TASK_DEFINITION: full-cicd-deployment-platform-dev-app
+  PROD_ECR_REPOSITORY: full-cicd-deployment-platform-prod-app
+  PROD_ECS_CLUSTER: full-cicd-deployment-platform-prod
+  PROD_ECS_SERVICE: full-cicd-deployment-platform-prod-app
+  PROD_ECS_TASK_DEFINITION: full-cicd-deployment-platform-prod-app
 
   ECS_CONTAINER_NAME: app
-  ECS_CONTAINER_PORT: 8080
-
   TF_DIR: infrastructure/terraform
 
 permissions:
@@ -48,81 +49,14 @@ permissions:
 jobs:
 
   # ============================================================
-  # JOB 1 - TERRAFORM VALIDATE
-  # Runs on every push and PR. Does NOT apply.
+  # JOB 1 — VALIDATE
+  # Runs on every push, PR, and manual dispatch.
+  # Never applies Terraform.
+  # For prod dispatch: validates without selecting dev workspace.
   # ============================================================
   validate:
     name: Validate
     runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Verify AWS account
-        run: |
-          echo "Verifying AWS credentials..."
-          aws sts get-caller-identity
-          echo "AWS credentials are valid."
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "~1.10"
-
-      - name: Terraform fmt check
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform fmt -check -recursive
-
-      - name: Terraform init
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform init -input=false
-
-      - name: Terraform validate
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform validate
-
-      - name: Terraform plan (validation only — no apply)
-        working-directory: ${{ env.TF_DIR }}
-        env:
-          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
-          TF_VAR_db_secret_arn: ${{ secrets.DB_SECRET_ARN }}
-        run: |
-          # Validates syntax and provider compatibility using the same var-file
-          # as the real apply. db_password and db_secret_arn are injected via
-          # TF_VAR_* because they are secrets and must not be in any file.
-          terraform plan -input=false \
-            -var-file="environments/dev/dev.tfvars"
-
-
-  # ============================================================
-  # JOB 2 - PROVISION / UPDATE DEV INFRASTRUCTURE
-  # Runs terraform apply for the dev environment.
-  # Creates ECR, VPC, ALB, RDS, ECS cluster/service, IAM role.
-  # Must complete before the image is pushed so ECR exists.
-  # ============================================================
-  infra-dev:
-    name: Provision Dev Infrastructure
-    runs-on: ubuntu-latest
-
-    needs: validate
-
-    # Only apply on pushes to main/master, not on PRs.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
-    environment: dev
-
-    outputs:
-      ecr_repository_url: ${{ steps.tf-outputs.outputs.ecr_repository_url }}
-      alb_dns_name: ${{ steps.tf-outputs.outputs.alb_dns_name }}
-      ecs_target_group_name: ${{ steps.tf-outputs.outputs.ecs_target_group_name }}
 
     steps:
       - name: Checkout
@@ -142,16 +76,77 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~1.10"
+
+      - name: Terraform fmt check
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan — dev (validation only, no apply)
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.environment == 'dev'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_db_secret_arn: ${{ secrets.DB_SECRET_ARN }}
+        run: |
+          terraform workspace select dev 2>/dev/null || terraform workspace new dev
+          terraform plan \
+            -input=false \
+            -var-file="environments/dev/dev.tfvars"
+
+  # ============================================================
+  # JOB 2 — PROVISION / UPDATE DEV INFRASTRUCTURE
+  # Runs only on push to main/master or manual dev dispatch.
+  # Never runs for PRs or prod dispatch.
+  # ============================================================
+  infra-dev:
+    name: Provision Dev Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate
+
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.environment == 'dev')
+
+    environment: dev
+
+    outputs:
+      ecr_repository_url: ${{ steps.tf-outputs.outputs.ecr_repository_url }}
+      alb_dns_name: ${{ steps.tf-outputs.outputs.alb_dns_name }}
+      ecs_target_group_name: ${{ steps.tf-outputs.outputs.ecs_target_group_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
           terraform_wrapper: false
 
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false
 
-      - name: Select or create dev workspace
+      - name: Select dev workspace
         working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform workspace select dev 2>/dev/null || terraform workspace new dev
+        run: terraform workspace select dev 2>/dev/null || terraform workspace new dev
 
       - name: Terraform apply — dev
         working-directory: ${{ env.TF_DIR }}
@@ -172,27 +167,22 @@ jobs:
           ALB_DNS=$(terraform output -raw alb_dns_name)
           TG_NAME=$(terraform output -raw ecs_target_group_name)
 
-          echo "ecr_repository_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
-          echo "alb_dns_name=${ALB_DNS}"        >> "$GITHUB_OUTPUT"
-          echo "ecs_target_group_name=${TG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "ecr_repository_url=${ECR_URL}"     >> "$GITHUB_OUTPUT"
+          echo "alb_dns_name=${ALB_DNS}"            >> "$GITHUB_OUTPUT"
+          echo "ecs_target_group_name=${TG_NAME}"   >> "$GITHUB_OUTPUT"
 
-          echo "ECR URL   : ${ECR_URL}"
-          echo "ALB DNS   : ${ALB_DNS}"
-          echo "TG Name   : ${TG_NAME}"
-
+          echo "ECR URL : ${ECR_URL}"
+          echo "ALB DNS : ${ALB_DNS}"
+          echo "TG Name : ${TG_NAME}"
 
   # ============================================================
-  # JOB 3 - BUILD AND PUSH DOCKER IMAGE
-  # Runs after infra-dev so ECR is guaranteed to exist.
-  # Manual workflow_dispatch uses an existing image tag — skips build.
+  # JOB 3 — BUILD AND PUSH IMAGE TO DEV ECR
+  # Runs only on push (not manual dispatch, not PRs).
   # ============================================================
   build:
-    name: Build & Push Image
+    name: Build and Push Image
     runs-on: ubuntu-latest
-
-    needs:
-      - validate
-      - infra-dev
+    needs: [validate, infra-dev]
 
     if: github.event_name == 'push'
 
@@ -221,9 +211,8 @@ jobs:
           REGISTRY="${{ steps.login-ecr.outputs.registry }}"
 
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
-
-          echo "IMAGE_LATEST=${REGISTRY}/${ECR_REPOSITORY}:latest" >> "$GITHUB_ENV"
-          echo "IMAGE_SHA=${REGISTRY}/${ECR_REPOSITORY}:${SHA}"    >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=${REGISTRY}/${DEV_ECR_REPOSITORY}:latest" >> "$GITHUB_ENV"
+          echo "IMAGE_SHA=${REGISTRY}/${DEV_ECR_REPOSITORY}:${SHA}"    >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -240,38 +229,274 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify image in ECR
+      - name: Verify image in dev ECR
         run: |
           aws ecr describe-images \
-            --repository-name "${ECR_REPOSITORY}" \
+            --region "$AWS_REGION" \
+            --repository-name "$DEV_ECR_REPOSITORY" \
             --image-ids imageTag="${GITHUB_SHA}" \
             --query 'imageDetails[0].imageTags' \
             --output text
 
-
   # ============================================================
-  # JOB 4 - DEPLOY TO ECS FARGATE (DEV)
+  # JOB 4 — DEPLOY TO DEV ECS
+  # Runs after a push build, or on manual dev dispatch.
   # ============================================================
   deploy-dev:
-    name: Deploy to ECS Fargate (Dev)
+    name: Deploy to ECS Dev
     runs-on: ubuntu-latest
-
-    needs:
-      - infra-dev
-      - build
+    needs: [infra-dev, build]
 
     if: |
       always() &&
       needs.infra-dev.result == 'success' &&
       (
         (github.event_name == 'push' && needs.build.result == 'success') ||
-        github.event_name == 'workflow_dispatch'
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.environment == 'dev')
       )
 
     environment: dev
 
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve and verify image
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+          else
+            IMAGE_TAG="${GITHUB_SHA}"
+          fi
+
+          aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --repository-name "$DEV_ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG"
+
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          echo "IMAGE_TAG=${IMAGE_TAG}"                              >> "$GITHUB_ENV"
+          echo "IMAGE_URI=${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_ENV"
+
+      - name: Get current dev task definition
+        run: |
+          aws ecs describe-task-definition \
+            --region "$AWS_REGION" \
+            --task-definition "$DEV_ECS_TASK_DEFINITION" \
+            --query taskDefinition \
+            --output json > task-definition.json
+
+      - name: Prepare dev task definition
+        run: |
+          jq --arg IMAGE "$IMAGE_URI" --arg CONTAINER "$ECS_CONTAINER_NAME" '
+            del(
+              .taskDefinitionArn,
+              .revision,
+              .status,
+              .requiresAttributes,
+              .compatibilities,
+              .registeredAt,
+              .registeredBy
+            )
+            | .containerDefinitions |= map(
+                if .name == $CONTAINER then .image = $IMAGE else . end
+              )
+          ' task-definition.json > new-task-definition.json
+
+      - name: Register dev task definition
+        run: |
+          TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+            --region "$AWS_REGION" \
+            --cli-input-json file://new-task-definition.json \
+            --query taskDefinition.taskDefinitionArn \
+            --output text)
+
+          echo "TASK_DEFINITION_ARN=${TASK_DEFINITION_ARN}" >> "$GITHUB_ENV"
+          echo "Registered: ${TASK_DEFINITION_ARN}"
+
+      - name: Update dev ECS service
+        run: |
+          aws ecs update-service \
+            --region "$AWS_REGION" \
+            --cluster "$DEV_ECS_CLUSTER" \
+            --service "$DEV_ECS_SERVICE" \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --output json | jq '{service:.service.serviceName,taskDef:.service.taskDefinition,desired:.service.desiredCount}'
+
+      - name: Wait for dev deployment to complete
+        run: |
+          echo "Waiting for ECS deployment — timeout 30 min"
+          MAX=120
+          SLEEP=15
+
+          for i in $(seq 1 $MAX); do
+            SVC=$(aws ecs describe-services \
+              --region "$AWS_REGION" \
+              --cluster "$DEV_ECS_CLUSTER" \
+              --services "$DEV_ECS_SERVICE" \
+              --output json)
+
+            DESIRED=$(echo "$SVC" | jq -r '.services[0].desiredCount')
+            RUNNING=$(echo "$SVC" | jq -r '.services[0].runningCount')
+            PENDING=$(echo "$SVC" | jq -r '.services[0].pendingCount')
+            ROLLOUT=$(echo "$SVC" | jq -r '.services[0].deployments[] | select(.status=="PRIMARY") | .rolloutState')
+
+            echo "[${i}/${MAX}] desired=${DESIRED} running=${RUNNING} pending=${PENDING} rollout=${ROLLOUT}"
+
+            if [ "$ROLLOUT" = "FAILED" ]; then
+              echo "ERROR: ECS deployment FAILED."
+              echo "$SVC" | jq -r '.services[0].events[:5][] | "  " + .message'
+              exit 1
+            fi
+
+            if [ "$ROLLOUT" = "COMPLETED" ] && [ "$RUNNING" = "$DESIRED" ] && [ "$PENDING" = "0" ]; then
+              echo "Dev deployment completed successfully."
+              exit 0
+            fi
+
+            sleep $SLEEP
+          done
+
+          echo "ERROR: Timed out after $((MAX * SLEEP)) seconds."
+          exit 1
+
+      - name: Show dev ECS status
+        run: |
+          aws ecs describe-services \
+            --region "$AWS_REGION" \
+            --cluster "$DEV_ECS_CLUSTER" \
+            --services "$DEV_ECS_SERVICE" \
+            --query 'services[0].{Status:status,Desired:desiredCount,Running:runningCount,Pending:pendingCount,TaskDefinition:taskDefinition}' \
+            --output table
+
+  # ============================================================
+  # JOB 5 — VERIFY DEV DEPLOYMENT
+  # ============================================================
+  verify-dev:
+    name: Verify Dev Deployment
+    runs-on: ubuntu-latest
+    needs: [infra-dev, deploy-dev]
+
+    if: |
+      always() &&
+      needs.infra-dev.result == 'success' &&
+      needs.deploy-dev.result == 'success'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify dev ECS task count
+        run: |
+          RUNNING=0
+          DESIRED=0
+
+          for i in $(seq 1 12); do
+            SVC=$(aws ecs describe-services \
+              --region "$AWS_REGION" \
+              --cluster "$DEV_ECS_CLUSTER" \
+              --services "$DEV_ECS_SERVICE" \
+              --query 'services[0].{running:runningCount,desired:desiredCount}' \
+              --output json)
+
+            RUNNING=$(echo "$SVC" | jq -r '.running')
+            DESIRED=$(echo "$SVC" | jq -r '.desired')
+
+            echo "[${i}/12] running=${RUNNING} desired=${DESIRED}"
+
+            if [ "$RUNNING" -eq "$DESIRED" ] && [ "$RUNNING" -ge 2 ]; then
+              echo "ECS task count healthy."
+              break
+            fi
+            sleep 15
+          done
+
+          if [ "$RUNNING" -lt 2 ]; then
+            echo "ERROR: fewer than 2 running tasks."
+            exit 1
+          fi
+
+      - name: Verify dev target group health
+        run: |
+          TG_NAME="${{ needs.infra-dev.outputs.ecs_target_group_name }}"
+
+          TG_ARN=$(aws elbv2 describe-target-groups \
+            --region "$AWS_REGION" \
+            --names "$TG_NAME" \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+
+          HEALTHY=0
+          for i in $(seq 1 12); do
+            HEALTHY=$(aws elbv2 describe-target-health \
+              --region "$AWS_REGION" \
+              --target-group-arn "$TG_ARN" \
+              --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' \
+              --output text)
+
+            echo "[${i}/12] healthy targets: ${HEALTHY}"
+            if [ "$HEALTHY" -ge 2 ]; then
+              echo "Target group healthy."
+              break
+            fi
+            sleep 15
+          done
+
+          if [ "$HEALTHY" -lt 2 ]; then
+            echo "ERROR: fewer than 2 healthy targets."
+            exit 1
+          fi
+
+      - name: Verify dev application health endpoint
+        run: |
+          ALB_DNS="${{ needs.infra-dev.outputs.alb_dns_name }}"
+          URL="http://${ALB_DNS}/health"
+          echo "Testing: ${URL}"
+
+          for i in $(seq 1 10); do
+            CODE=$(curl -s -o /tmp/health.json -w "%{http_code}" --max-time 10 "$URL" || true)
+            echo "[${i}/10] HTTP ${CODE}"
+            if [ "$CODE" = "200" ]; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 15
+          done
+
+          echo "ERROR: dev health check failed."
+          exit 1
+
+  # ============================================================
+  # JOB 6 — PROMOTE IMAGE TO PRODUCTION
+  # Runs only on manual dispatch selecting environment=prod.
+  # Uses GitHub Environment "prod" — configure required reviewers
+  # in Settings → Environments → prod → Required reviewers.
+  # ============================================================
+  promote-prod:
+    name: Promote Image to Production
+    runs-on: ubuntu-latest
+    needs: validate
+
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.environment == 'prod'
+
+    environment: prod
+
+    steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -284,53 +509,95 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       # ----------------------------------------------------------
-      # Determine which image should be deployed
+      # 1. Validate the requested tag and confirm it exists in dev ECR
       # ----------------------------------------------------------
-      - name: Resolve image tag
+      - name: Validate image tag and confirm in dev ECR
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ github.event.inputs.image_tag }}"
-          else
-            IMAGE_TAG="${GITHUB_SHA}"
+          IMAGE_TAG="${{ github.event.inputs.image_tag }}"
+
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "ERROR: image_tag input is required."
+            exit 1
           fi
 
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-
-          echo "IMAGE_TAG=${IMAGE_TAG}"   >> "$GITHUB_ENV"
-          echo "IMAGE_URI=${IMAGE_URI}"   >> "$GITHUB_ENV"
-
-          echo "Deploying image: ${IMAGE_URI}"
-
-      # ----------------------------------------------------------
-      # Verify requested image exists in ECR
-      # ----------------------------------------------------------
-      - name: Verify image exists in ECR
-        run: |
+          echo "Confirming image tag '${IMAGE_TAG}' exists in dev ECR..."
           aws ecr describe-images \
-            --repository-name "${ECR_REPOSITORY}" \
-            --image-ids imageTag="${IMAGE_TAG}" \
-            --region "${AWS_REGION}"
+            --region "$AWS_REGION" \
+            --repository-name "$DEV_ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG"
+
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+
+          # Capture the source digest for later comparison
+          SRC_DIGEST=$(aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --repository-name "$DEV_ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          echo "Source digest: ${SRC_DIGEST}"
+          echo "SRC_DIGEST=${SRC_DIGEST}" >> "$GITHUB_ENV"
 
       # ----------------------------------------------------------
-      # Download current ECS task definition
+      # 2. Copy image from dev ECR to prod ECR (no rebuild)
       # ----------------------------------------------------------
-      - name: Get current ECS task definition
+      - name: Copy image from dev ECR to prod ECR
+        run: |
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          DEV_IMAGE="${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}"
+          PROD_IMAGE="${REGISTRY}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "Pulling: ${DEV_IMAGE}"
+          docker pull "$DEV_IMAGE"
+
+          echo "Tagging as: ${PROD_IMAGE}"
+          docker tag "$DEV_IMAGE" "$PROD_IMAGE"
+
+          echo "Pushing: ${PROD_IMAGE}"
+          docker push "$PROD_IMAGE"
+
+          echo "PROD_IMAGE=${PROD_IMAGE}" >> "$GITHUB_ENV"
+
+      # ----------------------------------------------------------
+      # 3. Verify image in prod ECR and compare digest to source
+      # ----------------------------------------------------------
+      - name: Verify image in prod ECR and compare digest
+        run: |
+          DEST_DIGEST=$(aws ecr describe-images \
+            --region "$AWS_REGION" \
+            --repository-name "$PROD_ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          echo "Source digest : ${SRC_DIGEST}"
+          echo "Dest digest   : ${DEST_DIGEST}"
+
+          if [ "$SRC_DIGEST" != "$DEST_DIGEST" ]; then
+            echo "ERROR: digest mismatch — prod image does not match dev source."
+            exit 1
+          fi
+
+          echo "Digest verified: prod image matches dev source."
+
+      # ----------------------------------------------------------
+      # 4. Retrieve existing prod task definition
+      # ----------------------------------------------------------
+      - name: Get current production task definition
         run: |
           aws ecs describe-task-definition \
-            --task-definition "${ECS_TASK_DEFINITION}" \
-            --region "${AWS_REGION}" \
-            --query 'taskDefinition' \
-            --output json > task-definition.json
+            --region "$AWS_REGION" \
+            --task-definition "$PROD_ECS_TASK_DEFINITION" \
+            --query taskDefinition \
+            --output json > prod-task-definition.json
 
       # ----------------------------------------------------------
-      # Remove AWS-generated fields and replace only the image
+      # 5. Swap only the container image; preserve all other config
       # ----------------------------------------------------------
-      - name: Prepare new task definition
+      - name: Prepare production task definition
         run: |
-          jq \
-            --arg IMAGE "${IMAGE_URI}" \
-            '
+          jq --arg IMAGE "$PROD_IMAGE" --arg CONTAINER "$ECS_CONTAINER_NAME" '
             del(
               .taskDefinitionArn,
               .revision,
@@ -340,300 +607,138 @@ jobs:
               .registeredAt,
               .registeredBy
             )
-            |
-            .containerDefinitions |=
-              map(
-                if .name == env.ECS_CONTAINER_NAME
-                then .image = $IMAGE
-                else .
-                end
+            | .containerDefinitions |= map(
+                if .name == $CONTAINER then .image = $IMAGE else . end
               )
-            ' task-definition.json > new-task-definition.json
-
-          echo "New ECS task definition prepared."
+          ' prod-task-definition.json > new-prod-task-definition.json
 
       # ----------------------------------------------------------
-      # Register new ECS task definition revision
+      # 6. Register new prod task definition revision
       # ----------------------------------------------------------
-      - name: Register new ECS task definition
-        id: register
+      - name: Register production task definition
         run: |
-          TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file://new-task-definition.json \
-            --region "${AWS_REGION}" \
-            --query 'taskDefinition.taskDefinitionArn' \
+          PROD_TASK_ARN=$(aws ecs register-task-definition \
+            --region "$AWS_REGION" \
+            --cli-input-json file://new-prod-task-definition.json \
+            --query taskDefinition.taskDefinitionArn \
             --output text)
 
-          echo "TASK_DEFINITION_ARN=${TASK_DEFINITION_ARN}" >> "$GITHUB_ENV"
-
-          echo "Registered: ${TASK_DEFINITION_ARN}"
+          echo "Registered: ${PROD_TASK_ARN}"
+          echo "PROD_TASK_ARN=${PROD_TASK_ARN}" >> "$GITHUB_ENV"
 
       # ----------------------------------------------------------
-      # Update ECS service with new task definition
+      # 7. Update prod ECS service
       # ----------------------------------------------------------
-      - name: Update ECS service
+      - name: Update production ECS service
         run: |
           aws ecs update-service \
-            --cluster "${ECS_CLUSTER}" \
-            --service "${ECS_SERVICE}" \
-            --task-definition "${TASK_DEFINITION_ARN}" \
-            --region "${AWS_REGION}" \
-            --output json | jq '{
-              service:   .service.serviceName,
-              taskDef:   .service.taskDefinition,
-              desired:   .service.desiredCount,
-              running:   .service.runningCount,
-              pending:   .service.pendingCount
-            }'
+            --region "$AWS_REGION" \
+            --cluster "$PROD_ECS_CLUSTER" \
+            --service "$PROD_ECS_SERVICE" \
+            --task-definition "$PROD_TASK_ARN" \
+            --output json | jq '{service:.service.serviceName,taskDef:.service.taskDefinition,desired:.service.desiredCount}'
 
       # ----------------------------------------------------------
-      # Wait for ECS rolling deployment to complete.
-      # Custom loop replaces `aws ecs wait services-stable` which
-      # has a hard 600 s ceiling — too short for a rolling deploy
-      # with minimumHealthyPercent=100 and ALB drain time.
+      # 8. Wait for prod deployment with diagnostic output
       # ----------------------------------------------------------
-      - name: Wait for ECS deployment to complete
+      - name: Wait for production deployment to complete
         run: |
-          echo "========================================"
-          echo "Waiting for ECS deployment to complete"
-          echo "Cluster : ${ECS_CLUSTER}"
-          echo "Service : ${ECS_SERVICE}"
-          echo "Task def: ${TASK_DEFINITION_ARN}"
-          echo "Timeout : 30 minutes"
-          echo "========================================"
+          echo "Waiting for production ECS deployment — timeout 30 min"
+          MAX=120
+          SLEEP=15
 
-          MAX_ITERATIONS=120   # 120 × 15 s = 1800 s = 30 minutes
-          SLEEP_SECONDS=15
-          LAST_EVENT_TIME=""
-
-          for i in $(seq 1 ${MAX_ITERATIONS}); do
-
-            SERVICE_JSON=$(aws ecs describe-services \
-              --cluster "${ECS_CLUSTER}" \
-              --services "${ECS_SERVICE}" \
-              --region "${AWS_REGION}" \
+          for i in $(seq 1 $MAX); do
+            SVC=$(aws ecs describe-services \
+              --region "$AWS_REGION" \
+              --cluster "$PROD_ECS_CLUSTER" \
+              --services "$PROD_ECS_SERVICE" \
               --output json)
 
-            DESIRED=$(echo "${SERVICE_JSON}" | jq -r '.services[0].desiredCount')
-            RUNNING=$(echo "${SERVICE_JSON}" | jq -r '.services[0].runningCount')
-            PENDING=$(echo "${SERVICE_JSON}" | jq -r '.services[0].pendingCount')
+            DESIRED=$(echo "$SVC" | jq -r '.services[0].desiredCount')
+            RUNNING=$(echo "$SVC" | jq -r '.services[0].runningCount')
+            PENDING=$(echo "$SVC" | jq -r '.services[0].pendingCount')
+            ROLLOUT=$(echo "$SVC" | jq -r '.services[0].deployments[] | select(.status=="PRIMARY") | .rolloutState')
 
-            PRIMARY_JSON=$(echo "${SERVICE_JSON}" | \
-              jq -r '.services[0].deployments[] | select(.status=="PRIMARY")')
+            echo "[${i}/${MAX}] desired=${DESIRED} running=${RUNNING} pending=${PENDING} rollout=${ROLLOUT}"
 
-            ROLLOUT_STATE=$(echo "${PRIMARY_JSON}" | jq -r '.rolloutState')
-            PRIMARY_RUNNING=$(echo "${PRIMARY_JSON}" | jq -r '.runningCount')
-            PRIMARY_DESIRED=$(echo "${PRIMARY_JSON}" | jq -r '.desiredCount')
-
-            TS=$(date -u +"%H:%M:%S")
-            echo "[${i}/${MAX_ITERATIONS}] ${TS} | desired=${DESIRED} running=${RUNNING} pending=${PENDING} | primary: running=${PRIMARY_RUNNING}/${PRIMARY_DESIRED} rollout=${ROLLOUT_STATE}"
-
-            NEW_EVENTS=$(echo "${SERVICE_JSON}" | \
-              jq -r --arg LAST "${LAST_EVENT_TIME}" \
-              '.services[0].events[]
-               | select(.createdAt > $LAST)
-               | "  EVENT: " + .message' 2>/dev/null | tail -5)
-
-            if [ -n "${NEW_EVENTS}" ]; then
-              echo "${NEW_EVENTS}"
-              LAST_EVENT_TIME=$(echo "${SERVICE_JSON}" | \
-                jq -r '.services[0].events[0].createdAt // ""')
-            fi
-
-            if [ "${ROLLOUT_STATE}" = "FAILED" ]; then
-              echo ""
-              echo "ERROR: ECS deployment FAILED (rolloutState=FAILED)."
-              echo "Recent service events:"
-              echo "${SERVICE_JSON}" | \
-                jq -r '.services[0].events[:10][] | "  " + .message'
+            if [ "$ROLLOUT" = "FAILED" ]; then
+              echo "ERROR: Production ECS deployment FAILED."
+              echo "$SVC" | jq -r '.services[0].events[:10][] | "  " + .message'
               exit 1
             fi
 
-            if [ "${ROLLOUT_STATE}" = "COMPLETED" ] \
-              && [ "${RUNNING}" = "${DESIRED}" ] \
-              && [ "${PENDING}" = "0" ]; then
-              echo ""
-              echo "========================================"
-              echo "ECS deployment completed successfully."
-              echo "desired=${DESIRED} running=${RUNNING} pending=${PENDING}"
-              echo "========================================"
+            if [ "$ROLLOUT" = "COMPLETED" ] && [ "$RUNNING" = "$DESIRED" ] && [ "$PENDING" = "0" ]; then
+              echo "Production deployment completed successfully."
               exit 0
             fi
 
-            sleep ${SLEEP_SECONDS}
-
+            sleep $SLEEP
           done
 
-          echo ""
-          echo "ERROR: Timed out after $((MAX_ITERATIONS * SLEEP_SECONDS)) seconds."
+          echo "ERROR: Production deployment timed out after $((MAX * SLEEP)) seconds."
           aws ecs describe-services \
-            --cluster "${ECS_CLUSTER}" \
-            --services "${ECS_SERVICE}" \
-            --region "${AWS_REGION}" \
+            --region "$AWS_REGION" \
+            --cluster "$PROD_ECS_CLUSTER" \
+            --services "$PROD_ECS_SERVICE" \
             --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount,deployments:deployments}' \
             --output json
           exit 1
 
       # ----------------------------------------------------------
-      # Show final ECS service status
+      # 9. Verify prod ECS service stability and health endpoint
       # ----------------------------------------------------------
-      - name: Show ECS deployment status
+      - name: Verify production ECS service
         run: |
           aws ecs describe-services \
-            --cluster "${ECS_CLUSTER}" \
-            --services "${ECS_SERVICE}" \
-            --region "${AWS_REGION}" \
-            --query 'services[0].{
-              Status:status,
-              Desired:desiredCount,
-              Running:runningCount,
-              Pending:pendingCount,
-              TaskDefinition:taskDefinition
-            }' \
+            --region "$AWS_REGION" \
+            --cluster "$PROD_ECS_CLUSTER" \
+            --services "$PROD_ECS_SERVICE" \
+            --query 'services[0].{Status:status,Desired:desiredCount,Running:runningCount,Pending:pendingCount,TaskDefinition:taskDefinition}' \
             --output table
 
-
-  # ============================================================
-  # JOB 5 - VERIFY ECS + ALB (DEV)
-  # ============================================================
-  verify-dev:
-    name: Verify ECS Deployment (Dev)
-    runs-on: ubuntu-latest
-
-    needs:
-      - infra-dev
-      - deploy-dev
-
-    steps:
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # ----------------------------------------------------------
-      # Verify ECS running tasks
-      # ----------------------------------------------------------
-      - name: Check ECS running tasks
-        run: |
-          echo "Checking ECS running tasks..."
-
-          RUNNING=0
-          DESIRED=0
-
-          for i in $(seq 1 12); do
-
-            SVC=$(aws ecs describe-services \
-              --cluster "${ECS_CLUSTER}" \
-              --services "${ECS_SERVICE}" \
-              --region "${AWS_REGION}" \
-              --query 'services[0].{running:runningCount,desired:desiredCount}' \
-              --output json)
-
-            RUNNING=$(echo "${SVC}" | jq -r '.running')
-            DESIRED=$(echo "${SVC}" | jq -r '.desired')
-
-            echo "[${i}/12] Running=${RUNNING}, Desired=${DESIRED}"
-
-            if [ "${RUNNING}" -eq "${DESIRED}" ] && [ "${RUNNING}" -ge 2 ]; then
-              echo "ECS task count is healthy."
-              break
-            fi
-
-            sleep 15
-
-          done
-
-          if [ "${RUNNING}" -lt 2 ]; then
-            echo "ERROR: ECS does not have 2 running tasks."
-            exit 1
-          fi
-
-      # ----------------------------------------------------------
-      # Find ECS target group — derived from infra-dev output
-      # ----------------------------------------------------------
-      - name: Get ECS target group ARN
-        id: target-group
-        run: |
-          ECS_TG_NAME="${{ needs.infra-dev.outputs.ecs_target_group_name }}"
-
-          TG_ARN=$(aws elbv2 describe-target-groups \
-            --names "${ECS_TG_NAME}" \
-            --region "${AWS_REGION}" \
-            --query 'TargetGroups[0].TargetGroupArn' \
+          RUNNING=$(aws ecs describe-services \
+            --region "$AWS_REGION" \
+            --cluster "$PROD_ECS_CLUSTER" \
+            --services "$PROD_ECS_SERVICE" \
+            --query 'services[0].runningCount' \
             --output text)
 
-          echo "TG_ARN=${TG_ARN}" >> "$GITHUB_ENV"
+          DESIRED=$(aws ecs describe-services \
+            --region "$AWS_REGION" \
+            --cluster "$PROD_ECS_CLUSTER" \
+            --services "$PROD_ECS_SERVICE" \
+            --query 'services[0].desiredCount' \
+            --output text)
 
-          echo "Target group: ${TG_ARN}"
-
-      # ----------------------------------------------------------
-      # Verify healthy Fargate targets
-      # ----------------------------------------------------------
-      - name: Check ECS target health
-        run: |
-          HEALTHY=0
-
-          for i in $(seq 1 12); do
-
-            HEALTHY=$(aws elbv2 describe-target-health \
-              --target-group-arn "${TG_ARN}" \
-              --region "${AWS_REGION}" \
-              --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`] | length(@)' \
-              --output text)
-
-            echo "[${i}/12] Healthy targets: ${HEALTHY}"
-
-            if [ "${HEALTHY}" -ge 2 ]; then
-              echo "Both ECS targets are healthy."
-              break
-            fi
-
-            sleep 15
-
-          done
-
-          if [ "${HEALTHY}" -lt 2 ]; then
-            echo "ERROR: Less than 2 healthy ECS targets."
+          if [ "$RUNNING" -lt 1 ] || [ "$RUNNING" -ne "$DESIRED" ]; then
+            echo "ERROR: running=${RUNNING} desired=${DESIRED}"
             exit 1
           fi
 
-      # ----------------------------------------------------------
-      # Final ALB health check — ALB DNS derived from Terraform output
-      # ----------------------------------------------------------
-      - name: Verify application through ALB
+      - name: Verify production application health endpoint
         run: |
-          ALB_DNS="${{ needs.infra-dev.outputs.alb_dns_name }}"
-          URL="http://${ALB_DNS}/health"
+          PROD_ALB=$(aws elbv2 describe-load-balancers \
+            --region "$AWS_REGION" \
+            --query "LoadBalancers[?contains(LoadBalancerName,'prod')].DNSName | [0]" \
+            --output text)
 
+          if [ -z "$PROD_ALB" ] || [ "$PROD_ALB" = "None" ]; then
+            echo "ERROR: Could not resolve production ALB DNS name."
+            exit 1
+          fi
+
+          URL="http://${PROD_ALB}/health"
           echo "Testing: ${URL}"
 
           for i in $(seq 1 10); do
-
-            HTTP_CODE=$(curl \
-              -s \
-              -o /tmp/health-response.json \
-              -w "%{http_code}" \
-              --max-time 10 \
-              "${URL}" || true)
-
-            echo "[${i}/10] HTTP ${HTTP_CODE}"
-
-            if [ "${HTTP_CODE}" = "200" ]; then
-
-              echo "Application health check passed."
-
-              echo "Response:"
-              cat /tmp/health-response.json
-
+            CODE=$(curl -s -o /tmp/prod-health.json -w "%{http_code}" --max-time 10 "$URL" || true)
+            echo "[${i}/10] HTTP ${CODE}"
+            if [ "$CODE" = "200" ]; then
+              cat /tmp/prod-health.json
               exit 0
             fi
-
             sleep 15
-
           done
 
-          echo "ERROR: Application health check failed."
+          echo "ERROR: Production health check failed."
           exit 1
