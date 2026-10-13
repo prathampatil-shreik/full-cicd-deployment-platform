@@ -504,10 +504,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
       # ----------------------------------------------------------
       # 1. Validate the requested tag and confirm it exists in dev ECR
       # ----------------------------------------------------------
@@ -528,58 +524,73 @@ jobs:
 
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
 
-          # Capture the source digest for later comparison
-          SRC_DIGEST=$(aws ecr describe-images \
-            --region "$AWS_REGION" \
-            --repository-name "$DEV_ECR_REPOSITORY" \
-            --image-ids imageTag="$IMAGE_TAG" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-
-          echo "Source digest: ${SRC_DIGEST}"
-          echo "SRC_DIGEST=${SRC_DIGEST}" >> "$GITHUB_ENV"
-
       # ----------------------------------------------------------
-      # 2. Copy image from dev ECR to prod ECR (no rebuild)
+      # 2. Install Skopeo and authenticate to ECR
+      # Skopeo copies the manifest directly between registries —
+      # no image pull to the runner, digest is preserved exactly.
       # ----------------------------------------------------------
-      - name: Copy image from dev ECR to prod ECR
+      - name: Install Skopeo
         run: |
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          DEV_IMAGE="${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}"
-          PROD_IMAGE="${REGISTRY}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
 
-          echo "Pulling: ${DEV_IMAGE}"
-          docker pull "$DEV_IMAGE"
-
-          echo "Tagging as: ${PROD_IMAGE}"
-          docker tag "$DEV_IMAGE" "$PROD_IMAGE"
-
-          echo "Pushing: ${PROD_IMAGE}"
-          docker push "$PROD_IMAGE"
-
-          echo "PROD_IMAGE=${PROD_IMAGE}" >> "$GITHUB_ENV"
+      - name: Authenticate Skopeo to ECR
+        run: |
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            skopeo login \
+              --username AWS \
+              --password-stdin \
+              "$REGISTRY"
 
       # ----------------------------------------------------------
-      # 3. Verify image in prod ECR and compare digest to source
+      # 3. Copy image from dev ECR to prod ECR preserving digest
+      # ----------------------------------------------------------
+      - name: Copy image to production ECR
+        run: |
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          SRC="docker://${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}"
+          DEST="docker://${REGISTRY}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "Copying: ${SRC} → ${DEST}"
+          skopeo copy --preserve-digests "$SRC" "$DEST"
+
+          echo "PROD_IMAGE=${REGISTRY}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_ENV"
+
+      # ----------------------------------------------------------
+      # 4. Verify image in prod ECR and assert digest matches source
+      #
+      # aws ecr describe-images returns whichever manifest ECR
+      # indexes for the tag — for a buildx OCI image index this
+      # can be the manifest-list on the source side but the child
+      # platform manifest on the destination side, producing a
+      # false mismatch even though the image content is identical.
+      #
+      # skopeo inspect --raw fetches the raw manifest bytes from
+      # the registry and hashes them, so both sides are compared
+      # using the same manifest object (the top-level index).
       # ----------------------------------------------------------
       - name: Verify image in prod ECR and compare digest
         run: |
-          DEST_DIGEST=$(aws ecr describe-images \
-            --region "$AWS_REGION" \
-            --repository-name "$PROD_ECR_REPOSITORY" \
-            --image-ids imageTag="$IMAGE_TAG" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-          echo "Source digest : ${SRC_DIGEST}"
-          echo "Dest digest   : ${DEST_DIGEST}"
+          SRC_RAW_DIGEST=$(skopeo inspect --raw \
+            "docker://${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}" \
+            | sha256sum | awk '{print "sha256:" $1}')
 
-          if [ "$SRC_DIGEST" != "$DEST_DIGEST" ]; then
-            echo "ERROR: digest mismatch — prod image does not match dev source."
+          DEST_RAW_DIGEST=$(skopeo inspect --raw \
+            "docker://${REGISTRY}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}" \
+            | sha256sum | awk '{print "sha256:" $1}')
+
+          echo "Source manifest digest : ${SRC_RAW_DIGEST}"
+          echo "Dest manifest digest   : ${DEST_RAW_DIGEST}"
+
+          if [ "$SRC_RAW_DIGEST" != "$DEST_RAW_DIGEST" ]; then
+            echo "ERROR: digest mismatch — prod manifest does not match dev source."
             exit 1
           fi
 
-          echo "Digest verified: prod image matches dev source."
+          echo "Digest verified: prod image manifest matches dev source."
 
       # ----------------------------------------------------------
       # 4. Retrieve existing prod task definition
