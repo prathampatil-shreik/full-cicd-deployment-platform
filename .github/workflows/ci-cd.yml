@@ -544,9 +544,72 @@ jobs:
               "$REGISTRY"
 
       # ----------------------------------------------------------
-      # 3. Copy image from dev ECR to prod ECR preserving digest
+      # 3. Capture the exact source manifest digest.
+      #    skopeo inspect --raw returns the manifest bytes as the
+      #    registry holds them (OCI index or Schema 2 manifest).
+      #    Hashing those bytes gives the content-addressed digest
+      #    that ECR uses internally — independent of tag pointers.
+      # ----------------------------------------------------------
+      - name: Capture source manifest digest
+        run: |
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          SRC_RAW=$(skopeo inspect --raw \
+            "docker://${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}")
+
+          SRC_DIGEST=$(printf '%s' "$SRC_RAW" | sha256sum | awk '{print "sha256:" $1}')
+
+          echo "Source manifest digest: ${SRC_DIGEST}"
+          echo "SRC_DIGEST=${SRC_DIGEST}"   >> "$GITHUB_ENV"
+          REGISTRY_HOST="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          echo "PROD_IMAGE=${REGISTRY_HOST}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_ENV"
+
+      # ----------------------------------------------------------
+      # 4. Check whether prod ECR already holds the correct image.
+      #    - If the source digest already exists in prod ECR by
+      #      content-address, the copy is a no-op and we skip it.
+      #    - If the tag exists but points to a different digest,
+      #      we record that fact and proceed to copy. The existing
+      #      prod image is NOT deleted at this point.
+      #    - The current prod ECS service is untouched until after
+      #      digest verification succeeds (steps 5 and 6).
+      # ----------------------------------------------------------
+      - name: Check prod ECR for existing image
+        run: |
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          # Try to fetch the manifest by content-address in prod ECR.
+          # If it resolves, the exact image is already present — no copy needed.
+          if skopeo inspect --raw \
+               "docker://${REGISTRY}/${PROD_ECR_REPOSITORY}@${SRC_DIGEST}" \
+               > /dev/null 2>&1; then
+            echo "COPY_NEEDED=false" >> "$GITHUB_ENV"
+            echo "Source digest already present in prod ECR — copy not required."
+          else
+            echo "COPY_NEEDED=true" >> "$GITHUB_ENV"
+            echo "Source digest not yet in prod ECR — copy required."
+
+            # Report what the prod tag currently points to (informational only).
+            EXISTING=$(aws ecr describe-images \
+              --region "$AWS_REGION" \
+              --repository-name "$PROD_ECR_REPOSITORY" \
+              --image-ids imageTag="$IMAGE_TAG" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null || echo "(tag absent)")
+            echo "Current prod tag digest: ${EXISTING}"
+          fi
+
+      # ----------------------------------------------------------
+      # 5. Copy image from dev ECR to prod ECR preserving digest.
+      #    Runs only when the source digest is not already present.
+      #    skopeo copy --preserve-digests transfers the manifest
+      #    bytes verbatim — no layer re-encoding, no digest change.
+      #    The existing prod tag is NOT deleted before this step;
+      #    ECR will atomically update the tag pointer after the
+      #    manifest is written successfully.
       # ----------------------------------------------------------
       - name: Copy image to production ECR
+        if: env.COPY_NEEDED == 'true'
         run: |
           REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           SRC="docker://${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}"
@@ -555,45 +618,39 @@ jobs:
           echo "Copying: ${SRC} → ${DEST}"
           skopeo copy --preserve-digests "$SRC" "$DEST"
 
-          echo "PROD_IMAGE=${REGISTRY}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_ENV"
-
       # ----------------------------------------------------------
-      # 4. Verify image in prod ECR and assert digest matches source
-      #
-      # aws ecr describe-images returns whichever manifest ECR
-      # indexes for the tag — for a buildx OCI image index this
-      # can be the manifest-list on the source side but the child
-      # platform manifest on the destination side, producing a
-      # false mismatch even though the image content is identical.
-      #
-      # skopeo inspect --raw fetches the raw manifest bytes from
-      # the registry and hashes them, so both sides are compared
-      # using the same manifest object (the top-level index).
+      # 6. Verify the copy by content-address — never by tag.
+      #    Fetch the manifest from prod ECR using @SRC_DIGEST.
+      #    If ECR can resolve that digest, the exact manifest bytes
+      #    are present. Hashing the returned bytes must reproduce
+      #    SRC_DIGEST; any deviation means the copy was corrupted.
+      #    This step runs whether or not the copy step ran, so an
+      #    idempotent re-run also re-verifies.
+      #    The production ECS service is NOT updated until this
+      #    step exits 0.
       # ----------------------------------------------------------
-      - name: Verify image in prod ECR and compare digest
+      - name: Verify image in prod ECR by content-address
         run: |
           REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-          SRC_RAW_DIGEST=$(skopeo inspect --raw \
-            "docker://${REGISTRY}/${DEV_ECR_REPOSITORY}:${IMAGE_TAG}" \
-            | sha256sum | awk '{print "sha256:" $1}')
+          DEST_RAW=$(skopeo inspect --raw \
+            "docker://${REGISTRY}/${PROD_ECR_REPOSITORY}@${SRC_DIGEST}")
 
-          DEST_RAW_DIGEST=$(skopeo inspect --raw \
-            "docker://${REGISTRY}/${PROD_ECR_REPOSITORY}:${IMAGE_TAG}" \
-            | sha256sum | awk '{print "sha256:" $1}')
+          DEST_DIGEST=$(printf '%s' "$DEST_RAW" | sha256sum | awk '{print "sha256:" $1}')
 
-          echo "Source manifest digest : ${SRC_RAW_DIGEST}"
-          echo "Dest manifest digest   : ${DEST_RAW_DIGEST}"
+          echo "Expected digest : ${SRC_DIGEST}"
+          echo "Verified digest : ${DEST_DIGEST}"
 
-          if [ "$SRC_RAW_DIGEST" != "$DEST_RAW_DIGEST" ]; then
-            echo "ERROR: digest mismatch — prod manifest does not match dev source."
+          if [ "$SRC_DIGEST" != "$DEST_DIGEST" ]; then
+            echo "ERROR: digest mismatch — prod ECR content does not match dev source."
+            echo "The production ECS service has NOT been updated."
             exit 1
           fi
 
-          echo "Digest verified: prod image manifest matches dev source."
+          echo "Digest verified. Production ECS update may proceed."
 
       # ----------------------------------------------------------
-      # 4. Retrieve existing prod task definition
+      # 7. Retrieve existing prod task definition
       # ----------------------------------------------------------
       - name: Get current production task definition
         run: |
@@ -604,7 +661,7 @@ jobs:
             --output json > prod-task-definition.json
 
       # ----------------------------------------------------------
-      # 5. Swap only the container image; preserve all other config
+      # 8. Swap only the container image; preserve all other config
       # ----------------------------------------------------------
       - name: Prepare production task definition
         run: |
@@ -624,7 +681,7 @@ jobs:
           ' prod-task-definition.json > new-prod-task-definition.json
 
       # ----------------------------------------------------------
-      # 6. Register new prod task definition revision
+      # 9. Register new prod task definition revision
       # ----------------------------------------------------------
       - name: Register production task definition
         run: |
@@ -638,7 +695,7 @@ jobs:
           echo "PROD_TASK_ARN=${PROD_TASK_ARN}" >> "$GITHUB_ENV"
 
       # ----------------------------------------------------------
-      # 7. Update prod ECS service
+      # 10. Update prod ECS service
       # ----------------------------------------------------------
       - name: Update production ECS service
         run: |
@@ -650,7 +707,7 @@ jobs:
             --output json | jq '{service:.service.serviceName,taskDef:.service.taskDefinition,desired:.service.desiredCount}'
 
       # ----------------------------------------------------------
-      # 8. Wait for prod deployment with diagnostic output
+      # 11. Wait for prod deployment with diagnostic output
       # ----------------------------------------------------------
       - name: Wait for production deployment to complete
         run: |
@@ -696,7 +753,7 @@ jobs:
           exit 1
 
       # ----------------------------------------------------------
-      # 9. Verify prod ECS service stability and health endpoint
+      # 12. Verify prod ECS service stability and health endpoint
       # ----------------------------------------------------------
       - name: Verify production ECS service
         run: |
