@@ -79,7 +79,7 @@ Set these in:
 |-------------|-------|
 | `AWS_ACCESS_KEY_ID` | Access key ID of the IAM user (e.g. `AKIA…`) |
 | `AWS_SECRET_ACCESS_KEY` | Secret access key of the IAM user |
-| `AWS_REGION` | `us-east-1` |
+| `AWS_REGION` | `eu-north-1` |
 | `DB_PASSWORD` | RDS master password (used only for `terraform plan`) |
 
 None of these values must ever appear in source code or workflow logs.
@@ -263,7 +263,7 @@ terraform {
   backend "s3" {
     bucket         = "YOUR-TERRAFORM-STATE-BUCKET"
     key            = "full-cicd-deployment-platform/dev/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "eu-north-1"
     dynamodb_table = "YOUR-TERRAFORM-LOCK-TABLE"
     encrypt        = true
   }

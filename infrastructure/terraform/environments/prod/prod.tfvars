@@ -46,4 +46,4 @@ ecr_repository_url_override = ""
 # ARN of the Secrets Manager secret holding DB credentials for prod.
 # Create this secret manually in the new AWS account before running prod Terraform.
 # Then set PROD_DB_SECRET_ARN as a GitHub Actions secret.
-db_secret_arn = "REPLACE_WITH_PROD_SECRET_ARN"
+db_secret_arn = "arn:aws:secretsmanager:eu-north-1:284043563957:secret:full-cicd-deployment-platform/prod/database-kewjym"

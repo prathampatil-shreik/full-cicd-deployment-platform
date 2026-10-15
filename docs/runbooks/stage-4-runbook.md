@@ -5,10 +5,10 @@
 | Resource | Value |
 |----------|-------|
 | VPC CIDR | `10.0.0.0/16` |
-| Public subnets | `10.0.1.0/24`, `10.0.2.0/24` (us-east-1a/b) |
-| Private subnets | `10.0.11.0/24`, `10.0.12.0/24` (us-east-1a/b) |
+| Public subnets | `10.0.1.0/24`, `10.0.2.0/24` (eu-north-1a/b) |
+| Private subnets | `10.0.11.0/24`, `10.0.12.0/24` (eu-north-1a/b) |
 | ALB name | `full-cicd-deployment-dev-alb` |
-| ALB DNS | `full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com` |
+| ALB DNS | `full-cicd-deployment-dev-alb-<id>.eu-north-1.elb.amazonaws.com` (assigned by AWS after first apply) |
 | Target group | `full-cicd-deployment-dev-tg` (port 8080, HTTP) |
 | ASG name | `full-cicd-deployment-platform-dev-app-asg` |
 | Launch template | `full-cicd-deployment-platform-dev-app-lt` |
@@ -25,8 +25,8 @@
 | Resource | Value |
 |----------|-------|
 | VPC CIDR | `10.1.0.0/16` |
-| Public subnets | `10.1.1.0/24`, `10.1.2.0/24` (us-east-1a/b) |
-| Private subnets | `10.1.11.0/24`, `10.1.12.0/24` (us-east-1a/b) |
+| Public subnets | `10.1.1.0/24`, `10.1.2.0/24` (eu-north-1a/b) |
+| Private subnets | `10.1.11.0/24`, `10.1.12.0/24` (eu-north-1a/b) |
 | ALB name | `full-cicd-deployment-prod-alb` |
 | ALB DNS | Assigned by AWS after first `terraform apply` |
 | Target group | `full-cicd-deployment-prod-tg` (port 8080, HTTP) |
@@ -69,7 +69,7 @@
 The pipeline builds the Docker image **once** per push to `main`:
 
 ```
-ECR: 925213028316.dkr.ecr.us-east-1.amazonaws.com/full-cicd-deployment-platform-dev-app:<commit-sha>
+ECR: <account-id>.dkr.ecr.eu-north-1.amazonaws.com/full-cicd-deployment-platform-dev-app:<commit-sha>
 ```
 
 DEV deploys `<commit-sha>`. After DEV verification passes and a reviewer approves
@@ -210,7 +210,7 @@ allowing you to capture the evidence).
 Start polling before triggering a deployment:
 
 ```bash
-ALB="full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com"
+ALB="<dev-alb-dns>.eu-north-1.elb.amazonaws.com"
 while true; do
   CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://${ALB}/")
   echo "$(date +%T)  HTTP ${CODE}"
@@ -251,7 +251,7 @@ of ~300 seconds).
 Run a lightweight load test against the DEV ALB to trigger CPU-based scale-out.
 
 ```bash
-ALB="full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com"
+ALB="<dev-alb-dns>.eu-north-1.elb.amazonaws.com"
 
 # Option A — Apache Bench (install if needed)
 sudo apt-get install -y apache2-utils   # Ubuntu/Debian
@@ -325,7 +325,7 @@ aws ecr describe-images \
 
 ```bash
 GOOD_SHA="<previous-commit-sha>"
-ECR="925213028316.dkr.ecr.us-east-1.amazonaws.com/full-cicd-deployment-platform-dev-app"
+ECR="<account-id>.dkr.ecr.eu-north-1.amazonaws.com/full-cicd-deployment-platform-dev-app"
 ASG="full-cicd-deployment-platform-dev-app-asg"   # or prod
 
 LT_ID=$(aws autoscaling describe-auto-scaling-groups \
@@ -389,7 +389,7 @@ aws autoscaling describe-policies \
   --query 'ScalingPolicies[*].{Name:PolicyName,Type:PolicyType,Target:TargetTrackingConfiguration.TargetValue}'
 
 # HTTP check
-curl -I http://full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com/
+curl -I http://<dev-alb-dns>.eu-north-1.elb.amazonaws.com/
 
 # Current image tag on DEV instances
 aws ec2 describe-launch-template-versions \

@@ -32,7 +32,7 @@
         "ecr:PutLifecyclePolicy",
         "ecr:UploadLayerPart"
       ],
-      "Resource": "arn:aws:ecr:us-east-1:*:repository/full-cicd-deployment-platform-*"
+      "Resource": "arn:aws:ecr:eu-north-1:*:repository/full-cicd-deployment-platform-*"
     },
     {
       "Sid": "ECSManage",
@@ -105,7 +105,7 @@
         "secretsmanager:GetSecretValue",
         "secretsmanager:ListSecrets"
       ],
-      "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:full-cicd-deployment-platform/*"
+      "Resource": "arn:aws:secretsmanager:eu-north-1:*:secret:full-cicd-deployment-platform/*"
     },
     {
       "Sid": "CloudWatchLogs",
@@ -118,7 +118,7 @@
         "logs:PutRetentionPolicy",
         "logs:TagLogGroup"
       ],
-      "Resource": "arn:aws:logs:us-east-1:*:log-group:/ecs/full-cicd-deployment-platform-*"
+      "Resource": "arn:aws:logs:eu-north-1:*:log-group:/ecs/full-cicd-deployment-platform-*"
     },
     {
       "Sid": "ASGDeploy",

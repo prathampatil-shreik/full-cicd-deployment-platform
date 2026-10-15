@@ -79,7 +79,7 @@ The CI/CD pipeline builds the Docker image **once** and tags it with the full
 Git commit SHA:
 
 ```
-925213028316.dkr.ecr.us-east-1.amazonaws.com/full-cicd-deployment-platform-dev-app:<sha>
+<account-id>.dkr.ecr.eu-north-1.amazonaws.com/full-cicd-deployment-platform-dev-app:<sha>
 ```
 
 DEV is deployed using that SHA tag. After DEV verification passes and a human
@@ -150,7 +150,7 @@ Launch Template.
 Before triggering a deployment, start a continuous HTTP poll in a separate terminal:
 
 ```bash
-ALB="full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com"
+ALB="<dev-alb-dns>.eu-north-1.elb.amazonaws.com"
 while true; do
   CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://${ALB}/")
   echo "$(date +%T)  HTTP ${CODE}"
@@ -193,7 +193,7 @@ ASG limits:
 Run a lightweight load test against the DEV ALB to trigger CPU-based scale-out.
 
 ```bash
-ALB="full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com"
+ALB="<dev-alb-dns>.eu-north-1.elb.amazonaws.com"
 
 # Install Apache Bench if not present
 sudo apt-get install -y apache2-utils   # Linux
@@ -234,7 +234,7 @@ rolling refresh mechanism.
 ```bash
 # 1. Find the previous good commit SHA (from ECR or git log)
 GOOD_SHA="<previous-commit-sha>"
-ECR="925213028316.dkr.ecr.us-east-1.amazonaws.com/full-cicd-deployment-platform-dev-app"
+ECR="<account-id>.dkr.ecr.eu-north-1.amazonaws.com/full-cicd-deployment-platform-dev-app"
 ASG="full-cicd-deployment-platform-dev-app-asg"   # or prod
 
 # 2. Get the current Launch Template ID
@@ -303,7 +303,7 @@ aws autoscaling describe-policies \
   --auto-scaling-group-name full-cicd-deployment-platform-dev-app-asg
 
 # HTTP check
-curl -I http://full-cicd-deployment-dev-alb-1109505190.us-east-1.elb.amazonaws.com/
+curl -I http://<dev-alb-dns>.eu-north-1.elb.amazonaws.com/
 ```
 
 ### PROD
